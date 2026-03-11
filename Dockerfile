@@ -15,7 +15,7 @@ RUN cargo install dioxus-cli
 WORKDIR /app
 
 # Copy dependency files first for caching
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY api/Cargo.toml api/
 COPY desktop/Cargo.toml desktop/
 COPY mobile/Cargo.toml mobile/
