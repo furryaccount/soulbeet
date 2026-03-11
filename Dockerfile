@@ -31,7 +31,7 @@ COPY . .
 RUN npm install
 
 # Build the Tailwind CSS
-RUN npx @tailwindcss/cli -i ./web/assets/input.css -o ./web/assets/tailwind.css
+RUN npx postcss-cli ./web/assets/input.css -o web/assets/tailwind.css
 
 # Build the application
 RUN dx bundle --package web --release
