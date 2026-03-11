@@ -1,16 +1,21 @@
 # Build Stage
+FROM node:lts as node-builder
+WORKDIR /app
+
+COPY web web/
+
+# Install Tailwind dependencies
+RUN npm install
+
+# Build the Tailwind CSS
+RUN npx postcss-cli ./web/assets/input.css -o web/assets/tailwind.css
+
 FROM rust:1.91-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
   pkg-config \
-  libssl-dev \
-  curl \
-  unzip
-
-ARG version=20
-RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir './fnm' \
-&& cp ./fnm/fnm /usr/bin && fnm install $version
+  libssl-dev
 
 # Install Dioxus CLI
 RUN cargo install dioxus-cli
@@ -31,11 +36,7 @@ COPY lib/soulbeet/Cargo.toml lib/soulbeet/
 # Copy source code
 COPY . .
 
-# Install Tailwind dependencies
-RUN npm install
-
-# Build the Tailwind CSS
-RUN npx postcss-cli ./web/assets/input.css -o web/assets/tailwind.css
+COPY --from=node-builder /app/web/assets/tailwind.css web/assets/tailwind.css
 
 # Build the application
 RUN dx bundle --package web --release
