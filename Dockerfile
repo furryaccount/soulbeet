@@ -2,7 +2,7 @@
 FROM node:lts as node-builder
 WORKDIR /app
 
-COPY web web/
+COPY . .
 
 # Install Tailwind dependencies
 RUN npm install
