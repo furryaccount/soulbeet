@@ -39,7 +39,7 @@ RUN dx bundle --package web --release
 # Create an empty directory for data to be copied to runtime
 RUN mkdir -p /empty_data
 
-FROM python:3.11-slim-bookworm AS beets-builder
+FROM python:3.11-slim-trixie AS beets-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
