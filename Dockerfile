@@ -1,25 +1,12 @@
 # Build Stage
-FROM rust:1.91-bookworm AS builder
+FROM rust:1.94-trixie AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
   pkg-config \
-  libssl-dev
-
-# install LTS node
-# Use bash for the shell
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Create a script file sourced by both interactive and non-interactive bash shells
-ENV BASH_ENV /home/user/.bash_env
-RUN touch "${BASH_ENV}"
-RUN echo '. "${BASH_ENV}"' >> ~/.bashrc
-
-# Download and install nvm
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | PROFILE="${BASH_ENV}" bash
-RUN echo node > .nvmrc
-RUN nvm install --lts
-RUN nvm use --lts
+  libssl-dev \
+  nodejs \
+  npm
 
 # Install Dioxus CLI
 RUN cargo install dioxus-cli
