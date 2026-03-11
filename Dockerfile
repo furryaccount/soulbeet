@@ -1,12 +1,16 @@
 # Build Stage
-FROM rust:1.94-trixie AS builder
+FROM rust:1.91-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
   pkg-config \
   libssl-dev \
-  nodejs \
-  npm
+  curl \
+  unzip
+
+ARG version=20
+RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir './fnm' \
+&& cp ./fnm/fnm /usr/bin && fnm install $version
 
 # Install Dioxus CLI
 RUN cargo install dioxus-cli
@@ -15,7 +19,7 @@ RUN cargo install dioxus-cli
 WORKDIR /app
 
 # Copy dependency files first for caching
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY api/Cargo.toml api/
 COPY desktop/Cargo.toml desktop/
 COPY mobile/Cargo.toml mobile/
@@ -39,7 +43,7 @@ RUN dx bundle --package web --release
 # Create an empty directory for data to be copied to runtime
 RUN mkdir -p /empty_data
 
-FROM python:3.11-slim-trixie AS beets-builder
+FROM python:3.11-slim-bookworm AS beets-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
