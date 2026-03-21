@@ -231,9 +231,10 @@ pub async fn get_deletion_history() -> Result<Vec<DeletionReview>, ServerFnError
 
 /// Resolve a song path from Navidrome to an absolute path on disk.
 ///
-/// Navidrome may return absolute or relative paths depending on version.
-/// We try the path as-is first, then resolve against each music root
-/// derived from the user's folder paths.
+/// Navidrome returns paths relative to its music library root, which may not
+/// exactly match the filesystem (different naming conventions, character
+/// substitutions, stale paths). We try exact resolution first, then fall back
+/// to searching by artist directory + fuzzy filename matching.
 #[cfg(feature = "server")]
 fn resolve_song_path(
     path_str: &str,
@@ -246,7 +247,7 @@ fn resolve_song_path(
         return Some(path.to_path_buf());
     }
 
-    // Try resolving against each music root
+    // Try exact resolution against each music root
     for root in music_roots {
         let resolved = root.join(path_str);
         if resolved.exists() {
@@ -254,6 +255,95 @@ fn resolve_song_path(
         }
     }
 
+    // Fuzzy fallback: find by artist directory + filename stem.
+    // Navidrome paths look like "Artist/Album/01-12 - Title.flac".
+    // The actual file might be named differently (e.g. "12 Title.flac")
+    // or in a slightly different folder (e.g. "Album!" vs "Album?").
+    let components: Vec<_> = path.components().collect();
+    if components.is_empty() {
+        return None;
+    }
+
+    // Extract the artist directory (first component) and search within it
+    let artist_dir = components[0].as_os_str().to_string_lossy();
+    let file_stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Extract a clean title from the filename by stripping track numbers.
+    // "01-12 - Do You Feel" -> "do you feel"
+    // "12 Do You Feel" -> "do you feel"
+    let clean_title = strip_track_prefix(&file_stem);
+
+    for root in music_roots {
+        let artist_path = root.join(artist_dir.as_ref());
+        if !artist_path.is_dir() {
+            continue;
+        }
+        // Search recursively within the artist directory
+        if let Some(found) = find_file_by_title(&artist_path, &clean_title, &extension) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+/// Strip track number prefixes from a filename stem.
+/// "01-12 - do you feel" -> "do you feel"
+/// "12 do you feel" -> "do you feel"
+/// "01 - do you feel" -> "do you feel"
+#[cfg(feature = "server")]
+fn strip_track_prefix(stem: &str) -> String {
+    // Try "01-12 - Title" or "01 - Title" pattern
+    if let Some(idx) = stem.find(" - ") {
+        return stem[idx + 3..].trim().to_string();
+    }
+    // Try "12 Title" pattern (digits followed by space)
+    let trimmed = stem.trim_start_matches(|c: char| c.is_ascii_digit());
+    if trimmed.len() < stem.len() {
+        return trimmed.trim_start().to_string();
+    }
+    stem.to_string()
+}
+
+/// Recursively search for a file matching a title within a directory.
+#[cfg(feature = "server")]
+fn find_file_by_title(
+    dir: &std::path::Path,
+    clean_title: &str,
+    extension: &str,
+) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_by_title(&path, clean_title, extension) {
+                return Some(found);
+            }
+        } else if path.is_file() {
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if ext != extension {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let candidate_title = strip_track_prefix(&stem);
+            if candidate_title == clean_title {
+                return Some(path);
+            }
+        }
+    }
     None
 }
 
