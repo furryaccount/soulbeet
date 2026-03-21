@@ -274,14 +274,21 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
             }
         }
 
-        let mut profile_downloads = 0u32;
+        // Phase 1: Search and queue downloads (fast, parallel on slskd)
+        struct QueuedTrack {
+            artist: String,
+            track: String,
+            album: Option<String>,
+            slskd_filename: String,
+            key: String,
+        }
+        let mut queued: Vec<QueuedTrack> = Vec::new();
 
         for candidate in &candidates {
-            if profile_downloads >= tracks_per_profile as u32 {
+            if queued.len() >= tracks_per_profile {
                 break;
             }
 
-            // Skip tracks already suggested in a past batch, another profile, or deleted
             let key = format!(
                 "{}:{}",
                 candidate.artist.to_lowercase(),
@@ -324,9 +331,8 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                 info!("No results for '{}' - {}, skipping", candidate.artist, candidate.track);
                 continue;
             }
-            let group = &search_result.groups[0];
 
-            let item = &group.items[0];
+            let item = &search_result.groups[0].items[0];
             let download_results = match backend.download(vec![item.clone()]).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -337,23 +343,14 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
 
             for dl in &download_results {
                 if dl.error.is_none() {
-                    DiscoveryTrackRow::create(
-                        None,
-                        &candidate.track,
-                        &candidate.artist,
-                        candidate.album.as_deref().unwrap_or(""),
-                        &format!(
-                        "{}/{}",
-                        discovery_path,
-                        std::path::Path::new(&dl.item)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    ),
-                        folder_id,
-                        &profile_name,
-                    )
-                    .await?;
+                    seen.insert(key.clone());
+                    queued.push(QueuedTrack {
+                        artist: candidate.artist.clone(),
+                        track: candidate.track.clone(),
+                        album: candidate.album.clone(),
+                        slskd_filename: dl.item.clone(),
+                        key,
+                    });
                     DiscoveryCandidateRow::mark_used(
                         user_id,
                         &profile_name,
@@ -361,7 +358,6 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                         &candidate.track,
                     )
                     .await?;
-                    seen.insert(key.clone());
                     DiscoveryHistoryRow::record(
                         user_id,
                         &candidate.artist,
@@ -369,10 +365,146 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                         &profile_name,
                     )
                     .await?;
-                    profile_downloads += 1;
+                    break;
                 }
             }
         }
+
+        if queued.is_empty() {
+            continue;
+        }
+
+        // Phase 2: Wait for downloads to complete, then move to Discovery/
+        info!(
+            "{}: {} downloads queued, waiting for completion...",
+            profile_name,
+            queued.len()
+        );
+        let download_base = crate::config::CONFIG.download_path().clone();
+        let mut profile_downloads = 0u32;
+
+        // Poll slskd until all queued downloads are complete (or timeout after 10 min)
+        let wait_start = tokio::time::Instant::now();
+        let max_wait = tokio::time::Duration::from_secs(600);
+        let mut remaining_filenames: std::collections::HashSet<String> =
+            queued.iter().map(|q| q.slskd_filename.clone()).collect();
+
+        while !remaining_filenames.is_empty() && wait_start.elapsed() < max_wait {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+            let downloads = match backend.get_downloads().await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let mut newly_done = Vec::new();
+            for fname in remaining_filenames.iter() {
+                let matched = downloads.iter().find(|d| {
+                    crate::server_fns::download::monitor::filenames_match(&d.item, fname)
+                });
+                if let Some(dl) = matched {
+                    let done = matches!(
+                        dl.state,
+                        shared::download::DownloadState::Completed
+                            | shared::download::DownloadState::Failed(_)
+                            | shared::download::DownloadState::Cancelled
+                    );
+                    if done {
+                        newly_done.push(fname.clone());
+                    }
+                }
+            }
+            for fname in &newly_done {
+                remaining_filenames.remove(fname);
+            }
+        }
+
+        if !remaining_filenames.is_empty() {
+            warn!(
+                "{}: {} downloads didn't complete within timeout",
+                profile_name,
+                remaining_filenames.len()
+            );
+        }
+
+        // Phase 3: Move completed files to Discovery/ and record in DB
+        for qt in &queued {
+            if remaining_filenames.contains(&qt.slskd_filename) {
+                warn!(
+                    "Skipping '{}' - {} (download timed out)",
+                    qt.artist, qt.track
+                );
+                continue;
+            }
+
+            // Find the downloaded file using the same resolution logic as the import pipeline
+            let resolved = crate::server_fns::download::utils::resolve_download_path(
+                &qt.slskd_filename,
+                &download_base,
+            );
+            let src_path = match resolved {
+                Some(p) => p,
+                None => {
+                    warn!(
+                        "Could not find downloaded file for '{}' - {} (slskd: {})",
+                        qt.artist, qt.track, qt.slskd_filename
+                    );
+                    continue;
+                }
+            };
+
+            // Move to Discovery folder
+            let filename = std::path::Path::new(&src_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if filename.is_empty() {
+                continue;
+            }
+            let dest = format!("{}/{}", discovery_path, filename);
+            let dest_path = std::path::Path::new(&dest);
+
+            if let Err(e) = tokio::fs::rename(&src_path, &dest).await {
+                // Fall back to copy+delete for cross-filesystem moves
+                if e.raw_os_error() == Some(18) {
+                    if let Err(e) = tokio::fs::copy(&src_path, &dest).await {
+                        warn!("Failed to copy to Discovery/: {}", e);
+                        continue;
+                    }
+                    let _ = tokio::fs::remove_file(&src_path).await;
+                } else {
+                    warn!("Failed to move to Discovery/: {}", e);
+                    continue;
+                }
+            }
+
+            // Clean up empty parent dirs left after moving
+            if let Some(parent) = std::path::Path::new(&src_path).parent() {
+                if parent != download_base.as_path() {
+                    let _ = cleanup_empty_parent(parent).await;
+                }
+            }
+
+            if dest_path.exists() {
+                DiscoveryTrackRow::create(
+                    None,
+                    &qt.track,
+                    &qt.artist,
+                    qt.album.as_deref().unwrap_or(""),
+                    &dest,
+                    folder_id,
+                    &profile_name,
+                )
+                .await?;
+                profile_downloads += 1;
+            }
+        }
+
+        info!(
+            "{}: {} tracks moved to Discovery/",
+            profile_name, profile_downloads
+        );
 
         total_downloads += profile_downloads;
     }
@@ -528,6 +660,19 @@ pub async fn generate_recommendations() -> Result<u32, ServerFnError> {
     generate_recommendations_internal(&auth.0.sub)
         .await
         .map_err(server_error)
+}
+
+/// Remove a directory if it's empty, then try its parent too.
+#[cfg(feature = "server")]
+async fn cleanup_empty_parent(dir: &std::path::Path) -> Result<(), std::io::Error> {
+    let mut read_dir = tokio::fs::read_dir(dir).await?;
+    if read_dir.next_entry().await?.is_none() {
+        tokio::fs::remove_dir(dir).await?;
+        if let Some(parent) = dir.parent() {
+            let _ = Box::pin(cleanup_empty_parent(parent)).await;
+        }
+    }
+    Ok(())
 }
 
 /// Extract the last 2 path components (parent/filename) as a lowercase string
