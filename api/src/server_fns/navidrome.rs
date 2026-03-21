@@ -43,8 +43,18 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
     let promote_threshold = user_settings.discovery_promote_threshold;
     let auto_delete = user_settings.auto_delete_enabled;
 
-    let mut real_path_failures = 0u32;
+    // Navidrome returns absolute paths from ITS filesystem (ReportRealPath).
+    // If Navidrome runs on a different host or container, these paths need
+    // prefix substitution. NAVIDROME_MUSIC_PATH tells us what prefix to
+    // replace with the local mount point.
+    // e.g. Navidrome sees /media/music/..., Soulbeet sees /music/...
+    //      NAVIDROME_MUSIC_PATH=/media/music -> strip prefix, prepend local folder parent
+    let navidrome_prefix = std::env::var("NAVIDROME_MUSIC_PATH").ok().filter(|s| !s.is_empty());
+    let folders = crate::models::folder::Folder::get_all_by_user(user_id)
+        .await
+        .unwrap_or_default();
 
+    let mut real_path_failures = 0u32;
     let mut deleted_tracks = 0u32;
     let mut promoted_tracks = 0u32;
     let mut removed_tracks = 0u32;
@@ -71,9 +81,10 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                         );
                         skipped_veto += 1;
                     } else if let Some(ref path_str) = song.path {
-                        // Requires Navidrome's ReportRealPath to be enabled
-                        // so paths are absolute filesystem paths, not metadata-derived.
-                        let path = std::path::Path::new(path_str);
+                        // ReportRealPath gives absolute paths from Navidrome's filesystem.
+                        // Apply prefix substitution if Navidrome's mount differs from ours.
+                        let local_path = resolve_navidrome_path(path_str, &navidrome_prefix, &folders);
+                        let path = std::path::Path::new(&local_path);
                         if path.is_absolute() && path.exists() {
                             if let Err(e) = tokio::fs::remove_file(path).await {
                                 warn!("Auto-delete failed for {}: {}", path.display(), e);
@@ -86,7 +97,7 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                                     &song.title,
                                     song.artist.as_deref().unwrap_or("Unknown"),
                                     song.album.as_deref().unwrap_or("Unknown"),
-                                    Some(path_str),
+                                    Some(&local_path),
                                     Some(rating),
                                     user_id,
                                 )
@@ -195,6 +206,61 @@ pub async fn get_deletion_history() -> Result<Vec<DeletionReview>, ServerFnError
     DeletionReviewRow::get_history(&auth.0.sub, 50)
         .await
         .map_err(server_error)
+}
+
+/// Map a Navidrome absolute path to the local filesystem.
+///
+/// When Navidrome runs on a different host/container, its paths have a different
+/// prefix. NAVIDROME_MUSIC_PATH defines the prefix to strip, and we find the
+/// matching local folder to prepend.
+///
+/// Example: Navidrome path `/media/music/common/AURORA/track.flac`
+///          NAVIDROME_MUSIC_PATH = `/media/music`
+///          User folder = `/music/common`
+///          Result: `/music/common/AURORA/track.flac`
+#[cfg(feature = "server")]
+fn resolve_navidrome_path(
+    navidrome_path: &str,
+    navidrome_prefix: &Option<String>,
+    folders: &[crate::models::folder::Folder],
+) -> String {
+    let Some(prefix) = navidrome_prefix else {
+        // No prefix configured, use path as-is (same mount)
+        return navidrome_path.to_string();
+    };
+
+    // Strip the Navidrome prefix to get the relative path
+    let stripped = navidrome_path
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(navidrome_path)
+        .trim_start_matches('/');
+
+    // Find which user folder contains this relative path.
+    // stripped looks like "common/AURORA/track.flac"
+    // folders have paths like "/music/common", "/music/terry"
+    // We check if any folder's basename matches the first component of stripped.
+    for folder in folders {
+        let folder_name = std::path::Path::new(&folder.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if stripped.starts_with(&folder_name) {
+            let folder_parent = std::path::Path::new(&folder.path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            return format!("{}/{}", folder_parent, stripped);
+        }
+    }
+
+    // No matching folder found, try joining with the first folder's parent
+    if let Some(first) = folders.first() {
+        if let Some(parent) = std::path::Path::new(&first.path).parent() {
+            return format!("{}/{}", parent.display(), stripped);
+        }
+    }
+
+    navidrome_path.to_string()
 }
 
 /// Remove a directory if empty, then recurse up to its parent.
