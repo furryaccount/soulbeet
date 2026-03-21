@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "server")]
 use shared::recommendation::UserMusicProfile;
 
 #[cfg(feature = "server")]
