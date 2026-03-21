@@ -76,19 +76,9 @@ pub fn DiscoveryOverview() -> Element {
                                             "Target: {cfg.track_count} tracks / {cfg.lifetime_days}d lifetime"
                                         }
                                         div { class: "mt-1 space-y-0.5",
-                                            for (profile, name) in &cfg.playlist_names {
-                                                {
-                                                    let active = cfg.navidrome_playlist_ids.contains_key(profile);
-                                                    rsx! {
-                                                        p { class: "text-gray-400 text-xs font-mono",
-                                                            span { class: if active { "text-green-400" } else { "text-gray-500" },
-                                                                "{name}"
-                                                            }
-                                                            if active {
-                                                                span { class: "text-green-600 ml-1", " (active)" }
-                                                            }
-                                                        }
-                                                    }
+                                            for (_profile, name) in &cfg.playlist_names {
+                                                p { class: "text-gray-400 text-xs font-mono",
+                                                    span { class: "text-green-400", "{name}" }
                                                 }
                                             }
                                         }

@@ -243,18 +243,7 @@ async fn run_automation() {
         }
     }
 
-    // 2. Reconcile discovery playlists (link tracks to Navidrome, create playlists)
-    for user in &connected_users {
-        match crate::server_fns::discovery::reconcile_discovery_playlists(&user.id).await {
-            Ok(()) => {}
-            Err(e) => info!(
-                "Automation: playlist reconciliation failed for {}: {}",
-                user.username, e
-            ),
-        }
-    }
-
-    // 3. Regenerate recommendations for each user
+    // 2. Regenerate recommendations for each user
     for user in &connected_users {
         match crate::server_fns::discovery::generate_recommendations_internal(&user.id).await {
             Ok(count) => info!(
@@ -268,7 +257,7 @@ async fn run_automation() {
         }
     }
 
-    // 4. Regenerate expired discovery playlists (per-user)
+    // 3. Regenerate expired discovery playlists (per-user)
     info!("Automation: checking for expired discovery playlists...");
     match crate::models::user_settings::UserSettings::get_expired_discoveries().await {
         Ok(expired_users) => {

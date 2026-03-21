@@ -92,7 +92,6 @@ pub struct DiscoveryConfig {
     pub lifetime_days: u32,
     pub profiles: String,
     pub playlist_names: std::collections::HashMap<String, String>,
-    pub navidrome_playlist_ids: std::collections::HashMap<String, String>,
     pub last_generated_at: Option<String>,
 }
 

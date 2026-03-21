@@ -47,11 +47,6 @@ pub async fn get_discovery_config() -> Result<DiscoveryConfig, ServerFnError> {
         lifetime_days: settings.discovery_lifetime_days as u32,
         profiles: settings.discovery_profiles,
         playlist_names: serde_json::from_str(&settings.discovery_playlist_name).unwrap_or_default(),
-        navidrome_playlist_ids: settings
-            .discovery_navidrome_playlist_id
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default(),
         last_generated_at: settings.discovery_last_generated_at,
     })
 }
@@ -98,24 +93,41 @@ pub async fn promote_discovery_track(req: TrackActionRequest) -> Result<(), Serv
         return Err(server_error(format!("File not found: {}", track.path)));
     }
 
-    let filename = src
-        .file_name()
-        .ok_or_else(|| server_error("Invalid filename"))?
-        .to_string_lossy()
-        .to_string();
-    let dest = std::path::PathBuf::from(&folder.path).join(&filename);
-
-    if let Err(e) = tokio::fs::rename(&src, &dest).await {
-        // Fall back to copy+delete for cross-filesystem moves (EXDEV)
-        if e.raw_os_error() == Some(18) {
-            tokio::fs::copy(&src, &dest)
-                .await
-                .map_err(|e| server_error(format!("Failed to copy file: {}", e)))?;
-            tokio::fs::remove_file(&src)
-                .await
-                .map_err(|e| server_error(format!("Failed to remove source after copy: {}", e)))?;
-        } else {
-            return Err(server_error(format!("Failed to move file: {}", e)));
+    // Import into the parent library folder via beets for proper tagging/organization
+    let target = std::path::PathBuf::from(&folder.path);
+    match crate::services::music_importer(None).await {
+        Ok(imp) => {
+            match imp.import(&[src.as_path()], &target, false).await {
+                Ok(soulbeet::ImportResult::Success) => {}
+                Ok(soulbeet::ImportResult::Skipped) => {
+                    return Err(server_error("Beets skipped this track (duplicate?)"));
+                }
+                Ok(other) => {
+                    return Err(server_error(format!("Import issue: {:?}", other)));
+                }
+                Err(e) => {
+                    return Err(server_error(format!("Import failed: {}", e)));
+                }
+            }
+        }
+        Err(_) => {
+            // Fallback: raw move if no importer
+            let filename = src
+                .file_name()
+                .ok_or_else(|| server_error("Invalid filename"))?
+                .to_string_lossy()
+                .to_string();
+            let dest = target.join(&filename);
+            if let Err(e) = tokio::fs::rename(&src, &dest).await {
+                if e.raw_os_error() == Some(18) {
+                    tokio::fs::copy(&src, &dest)
+                        .await
+                        .map_err(|e| server_error(format!("Failed to copy: {}", e)))?;
+                    let _ = tokio::fs::remove_file(&src).await;
+                } else {
+                    return Err(server_error(format!("Failed to move: {}", e)));
+                }
+            }
         }
     }
 
@@ -127,7 +139,7 @@ pub async fn promote_discovery_track(req: TrackActionRequest) -> Result<(), Serv
         warn!("Failed to update history for promoted track '{}': {}", track.title, e);
     }
 
-    info!("Promoted: {} -> {}", track.title, dest.display());
+    info!("Promoted: {} -> {}", track.title, folder.path);
     Ok(())
 }
 
@@ -212,10 +224,16 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
         ((settings.discovery_track_count as usize) / selected_profiles.len().max(1)).max(1);
 
     let backend = download_backend(None).await?;
-    let discovery_path = folder.discovery_path();
-    tokio::fs::create_dir_all(&discovery_path)
-        .await
-        .map_err(|e| format!("Failed to create Discovery dir: {}", e))?;
+
+    // Create per-profile subdirectories under Discovery/ and drop .nsp smart
+    // playlist files so Navidrome auto-maintains playlists from folder contents.
+    for profile in &selected_profiles {
+        let profile_dir = folder.discovery_profile_path(&profile.to_string());
+        tokio::fs::create_dir_all(&profile_dir)
+            .await
+            .map_err(|e| format!("Failed to create Discovery/{} dir: {}", profile, e))?;
+        write_nsp_if_missing(&profile_dir, &folder.path, &profile.to_string(), &settings.discovery_playlist_name).await?;
+    }
 
     // Build the "already seen" set for deduplication
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -427,9 +445,10 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
             );
         }
 
-        // Phase 3: Import completed files into Discovery/ via beets and record in DB
+        // Phase 3: Import completed files into Discovery/{profile}/ via beets and record in DB
         let importer = crate::services::music_importer(None).await;
-        let discovery_target = std::path::PathBuf::from(&discovery_path);
+        let profile_path = folder.discovery_profile_path(&profile_name);
+        let discovery_target = std::path::PathBuf::from(&profile_path);
 
         for qt in &queued {
             if remaining_filenames.contains(&qt.slskd_filename) {
@@ -489,7 +508,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                 if filename.is_empty() {
                     continue;
                 }
-                let dest = format!("{}/{}", discovery_path, filename);
+                let dest = format!("{}/{}", profile_path, filename);
                 if let Err(e) = tokio::fs::rename(&src_path, &dest).await {
                     if e.raw_os_error() == Some(18) {
                         if let Err(e) = tokio::fs::copy(&src_path, &dest).await {
@@ -516,7 +535,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    format!("{}/{}", discovery_path, filename)
+                    format!("{}/{}", profile_path, filename)
                 }
             };
 
@@ -550,140 +569,55 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
     Ok(total_downloads)
 }
 
-/// Match pending discovery tracks to Navidrome songs and create/update playlists.
-///
-/// Downloads are async (slskd), so at generation time the files aren't indexed
-/// by Navidrome yet. This function runs later (during automation) to:
-/// 1. Match discovery tracks to Navidrome songs by path
-/// 2. Update song_ids in the database
-/// 3. Create or refresh Navidrome playlists per profile
+/// Write a Navidrome .nsp smart playlist file into a Discovery profile folder.
+/// The .nsp makes Navidrome auto-maintain a playlist from the folder contents.
+/// Only writes if the file doesn't already exist (user may have customized it).
 #[cfg(feature = "server")]
-pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> {
-    let settings = UserSettings::get(user_id).await?;
-    if !settings.discovery_enabled {
+async fn write_nsp_if_missing(
+    profile_dir: &str,
+    folder_path: &str,
+    profile: &str,
+    playlist_names_json: &str,
+) -> Result<(), String> {
+    let nsp_path = format!("{}/playlist.nsp", profile_dir);
+    if std::path::Path::new(&nsp_path).exists() {
         return Ok(());
     }
-    let folder_id = match settings.discovery_folder_id.as_ref() {
-        Some(id) => id.clone(),
-        None => return Ok(()),
-    };
 
-    let navi = match crate::services::navidrome_client_for_user(user_id).await {
-        Ok(c) => c,
-        Err(_) => return Ok(()),
-    };
+    // Build the filepath prefix relative to the Navidrome music library root.
+    // folder_path is absolute (e.g. /music/User1). We need the path relative to
+    // the Navidrome music root. Since we don't know the root, use the last 2
+    // components (e.g. User1/Discovery/Balanced) which will match regardless of
+    // where the root is mounted.
+    let full = format!("{}/Discovery/{}", folder_path, profile);
+    let rel: String = std::path::Path::new(&full)
+        .components()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/");
 
-    // Get all Navidrome songs to match against discovery tracks
-    let songs = navi
-        .get_all_songs_with_ratings()
+    let playlist_name = UserSettings::get_playlist_name_for_profile(playlist_names_json, profile);
+
+    let nsp_content = serde_json::json!({
+        "name": playlist_name,
+        "comment": format!("Auto-managed by Soulful discovery ({})", profile),
+        "all": [
+            { "contains": { "filepath": rel } }
+        ],
+        "sort": "dateAdded",
+        "order": "desc"
+    });
+
+    tokio::fs::write(&nsp_path, serde_json::to_string_pretty(&nsp_content).unwrap_or_default())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Failed to write .nsp file: {}", e))?;
 
-    // Get pending discovery tracks missing a song_id
-    let pending = DiscoveryTrackRow::get_pending_by_folder(&folder_id).await?;
-    let unlinked: Vec<_> = pending.iter().filter(|t| t.song_id.is_none()).collect();
-    if unlinked.is_empty() {
-        // All tracks already linked, just ensure playlists exist
-        return ensure_playlists(user_id, &settings, &folder_id, &navi).await;
-    }
-
-    let mut matched = 0u32;
-    for track in &unlinked {
-        let track_path = std::path::Path::new(&track.path);
-        let track_suffix = path_suffix(track_path);
-
-        let mut found = false;
-        for song in &songs {
-            if let Some(ref song_path_str) = song.path {
-                let song_path = std::path::Path::new(song_path_str);
-                // Match by path suffix (parent dir + filename) for accuracy,
-                // fall back to filename-only if suffix doesn't match
-                let song_suffix = path_suffix(song_path);
-                let is_match = track_suffix == song_suffix
-                    || track_path.file_name().map(|f| f.to_ascii_lowercase())
-                        == song_path.file_name().map(|f| f.to_ascii_lowercase());
-                if is_match {
-                    DiscoveryTrackRow::update_song_id(&track.id, &song.id).await?;
-                    matched += 1;
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if !found {
-            info!(
-                "Reconciliation: no Navidrome match for '{}' - {} ({})",
-                track.artist, track.title, track.path
-            );
-        }
-    }
-
-    info!(
-        "Discovery playlist reconciliation: linked {} of {} unlinked tracks",
-        matched,
-        unlinked.len()
-    );
-
-    ensure_playlists(user_id, &settings, &folder_id, &navi).await
-}
-
-#[cfg(feature = "server")]
-async fn ensure_playlists(
-    user_id: &str,
-    settings: &UserSettings,
-    folder_id: &str,
-    navi: &soulbeet::NavidromeClient,
-) -> Result<(), String> {
-    let selected_profiles = parse_profiles(&settings.discovery_profiles);
-
-    for profile in &selected_profiles {
-        let profile_name = profile.to_string();
-        let tracks =
-            DiscoveryTrackRow::get_pending_by_folder_and_profile(folder_id, &profile_name).await?;
-        let song_ids: Vec<String> = tracks.iter().filter_map(|t| t.song_id.clone()).collect();
-
-        if song_ids.is_empty() {
-            continue;
-        }
-
-        let playlist_name = UserSettings::get_playlist_name_for_profile(
-            &settings.discovery_playlist_name,
-            &profile_name,
-        );
-
-        let old_id = UserSettings::get_playlist_id_for_profile(
-            &settings.discovery_navidrome_playlist_id,
-            &profile_name,
-        );
-
-        // Create new playlist first, then delete old one only on success.
-        // This avoids losing the old playlist if creation fails.
-        match navi.create_playlist(&playlist_name, &song_ids).await {
-            Ok(pl) => {
-                if let Err(e) = UserSettings::update_discovery_playlist_id(user_id, &profile_name, &pl.id).await {
-                    warn!("Failed to save playlist ID for '{}': {}", profile_name, e);
-                }
-                // Now safe to delete the old one
-                if let Some(ref old) = old_id {
-                    if let Err(e) = navi.delete_playlist(old).await {
-                        warn!("Failed to delete old playlist '{}': {}", old, e);
-                    }
-                }
-                info!(
-                    "Created Navidrome playlist '{}' with {} tracks",
-                    playlist_name,
-                    song_ids.len()
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to create Navidrome playlist '{}': {}",
-                    playlist_name, e
-                );
-            }
-        }
-    }
-
+    info!("Created smart playlist: {} ({})", playlist_name, nsp_path);
     Ok(())
 }
 
@@ -694,26 +628,40 @@ pub async fn generate_recommendations() -> Result<u32, ServerFnError> {
         .map_err(server_error)
 }
 
-/// Find the most recently modified file in a directory (non-recursive).
-/// Used after beets import to find the file beets placed (it may have been renamed).
+/// Find the most recently modified file under a directory (recursive).
+/// Used after beets import to find the file beets placed (it may have been
+/// renamed and moved into an Artist/Album/ subdirectory).
 #[cfg(feature = "server")]
 async fn find_newest_file(dir: &std::path::Path) -> Option<String> {
-    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
-    let mut entries = tokio::fs::read_dir(dir).await.ok()?;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Ok(meta) = path.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if newest.as_ref().map_or(true, |(_, t)| modified > *t) {
-                    newest = Some((path, modified));
+    fn walk(dir: &std::path::Path) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+        let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip the .nsp file's directory marker
+                if let Some(result) = walk(&path) {
+                    if newest.as_ref().map_or(true, |(_, t)| result.1 > *t) {
+                        newest = Some(result);
+                    }
+                }
+            } else if path.is_file() {
+                // Skip .nsp and .db files
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "nsp" || ext == "db" {
+                    continue;
+                }
+                if let Ok(meta) = path.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if newest.as_ref().map_or(true, |(_, t)| modified > *t) {
+                            newest = Some((path, modified));
+                        }
+                    }
                 }
             }
         }
+        newest
     }
-    newest.map(|(p, _)| p.to_string_lossy().to_string())
+    walk(dir).map(|(p, _)| p.to_string_lossy().to_string())
 }
 
 /// Remove a directory if it's empty, then try its parent too.
@@ -727,19 +675,6 @@ async fn cleanup_empty_parent(dir: &std::path::Path) -> Result<(), std::io::Erro
         }
     }
     Ok(())
-}
-
-/// Extract the last 2 path components (parent/filename) as a lowercase string
-/// for fuzzy path matching between Navidrome and local paths.
-#[cfg(feature = "server")]
-fn path_suffix(p: &std::path::Path) -> String {
-    let components: Vec<_> = p.components().rev().take(2).collect();
-    components
-        .into_iter()
-        .rev()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 #[cfg(feature = "server")]

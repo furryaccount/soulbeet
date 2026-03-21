@@ -72,6 +72,10 @@ impl Folder {
         format!("{}/Discovery", self.path)
     }
 
+    pub fn discovery_profile_path(&self, profile: &str) -> String {
+        format!("{}/Discovery/{}", self.path, profile)
+    }
+
     pub async fn has_discovery_enabled(&self) -> Result<bool, String> {
         use crate::models::user_settings::UserSettings;
         let settings = UserSettings::get(&self.user_id).await?;
