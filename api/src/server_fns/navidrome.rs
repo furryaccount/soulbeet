@@ -43,18 +43,7 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
     let promote_threshold = user_settings.discovery_promote_threshold;
     let auto_delete = user_settings.auto_delete_enabled;
 
-    // Collect the user's configured folder paths for file resolution.
-    // Auto-delete searches these folders to find files matching Navidrome metadata.
-    let folders = crate::models::folder::Folder::get_all_by_user(user_id)
-        .await
-        .unwrap_or_default();
-    let folder_paths: Vec<std::path::PathBuf> = folders
-        .iter()
-        .map(|f| std::path::PathBuf::from(&f.path))
-        .collect();
-    if folder_paths.is_empty() {
-        warn!("No folders configured for user {}, auto-delete will not work", user_id);
-    }
+    let mut real_path_failures = 0u32;
 
     let mut deleted_tracks = 0u32;
     let mut promoted_tracks = 0u32;
@@ -81,40 +70,32 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                             song.title
                         );
                         skipped_veto += 1;
-                    } else {
-                        let artist = song.artist.as_deref().unwrap_or("");
-                        let ext = song.path.as_deref()
-                            .and_then(|p| std::path::Path::new(p).extension())
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("flac");
-                        match find_track_file(&folder_paths, artist, &song.title, ext) {
-                            Some(path) => {
-                                if let Err(e) = tokio::fs::remove_file(&path).await {
-                                    warn!("Auto-delete failed for {}: {}", path.display(), e);
-                                } else {
-                                    if let Some(parent) = path.parent() {
-                                        let _ = cleanup_empty_dirs(parent).await;
-                                    }
-                                    DeletionReviewRow::upsert(
-                                        &song.id,
-                                        &song.title,
-                                        artist,
-                                        song.album.as_deref().unwrap_or("Unknown"),
-                                        Some(&path.to_string_lossy()),
-                                        Some(rating),
-                                        user_id,
-                                    )
-                                    .await?;
-                                    deleted_tracks += 1;
+                    } else if let Some(ref path_str) = song.path {
+                        // Requires Navidrome's ReportRealPath to be enabled
+                        // so paths are absolute filesystem paths, not metadata-derived.
+                        let path = std::path::Path::new(path_str);
+                        if path.is_absolute() && path.exists() {
+                            if let Err(e) = tokio::fs::remove_file(path).await {
+                                warn!("Auto-delete failed for {}: {}", path.display(), e);
+                            } else {
+                                if let Some(parent) = path.parent() {
+                                    let _ = cleanup_empty_dirs(parent).await;
                                 }
+                                DeletionReviewRow::upsert(
+                                    &song.id,
+                                    &song.title,
+                                    song.artist.as_deref().unwrap_or("Unknown"),
+                                    song.album.as_deref().unwrap_or("Unknown"),
+                                    Some(path_str),
+                                    Some(rating),
+                                    user_id,
+                                )
+                                .await?;
+                                deleted_tracks += 1;
                             }
-                            None => {
-                                warn!(
-                                    "Auto-delete skipped (file not found): {} - {}",
-                                    artist, song.title
-                                );
-                                skipped_not_found += 1;
-                            }
+                        } else {
+                            real_path_failures += 1;
+                            skipped_not_found += 1;
                         }
                     }
                 }
@@ -187,6 +168,14 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
             "Auto-delete: {} skipped (shared veto), {} skipped (file not found)",
             skipped_veto, skipped_not_found
         );
+        if real_path_failures > 0 {
+            warn!(
+                "Auto-delete: {} tracks had non-absolute paths. \
+                 Enable ReportRealPath in Navidrome (player settings or ND_SUBSONIC_DEFAULTREPORTREALPATH=true) \
+                 and ensure both containers mount music at the same path.",
+                real_path_failures
+            );
+        }
     }
     info!(
         "Ratings sync complete: {} songs scanned, {} deleted, {} promoted, {} removed",
@@ -206,90 +195,6 @@ pub async fn get_deletion_history() -> Result<Vec<DeletionReview>, ServerFnError
     DeletionReviewRow::get_history(&auth.0.sub, 50)
         .await
         .map_err(server_error)
-}
-
-/// Find a track file on disk by searching the user's configured folders.
-///
-/// Navidrome's path field is unreliable for filesystem operations (different
-/// mounts, naming conventions, character substitutions). Instead we search
-/// by metadata: find the artist directory, then find a file whose name
-/// contains the track title with the right extension.
-#[cfg(feature = "server")]
-fn find_track_file(
-    folder_paths: &[std::path::PathBuf],
-    artist: &str,
-    title: &str,
-    extension: &str,
-) -> Option<std::path::PathBuf> {
-    if artist.is_empty() || title.is_empty() {
-        return None;
-    }
-
-    let artist_lower = artist.to_lowercase();
-    let title_lower = title.to_lowercase();
-    let ext_lower = extension.to_lowercase();
-
-    for folder in folder_paths {
-        // Scan top-level directories in the folder to find the artist
-        let entries = match std::fs::read_dir(folder) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let dir_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            if dir_name != artist_lower {
-                continue;
-            }
-            // Found artist directory. Search it recursively for the track.
-            if let Some(found) = search_for_title(&path, &title_lower, &ext_lower) {
-                return Some(found);
-            }
-        }
-    }
-
-    None
-}
-
-/// Recursively search a directory for a music file whose stem contains the title.
-#[cfg(feature = "server")]
-fn search_for_title(
-    dir: &std::path::Path,
-    title_lower: &str,
-    ext_lower: &str,
-) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = search_for_title(&path, title_lower, ext_lower) {
-                return Some(found);
-            }
-        } else if path.is_file() {
-            let ext = path
-                .extension()
-                .map(|e| e.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            if ext != ext_lower {
-                continue;
-            }
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            // Match if the filename contains the title (handles any track number format)
-            if stem.contains(title_lower) {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 /// Remove a directory if empty, then recurse up to its parent.
