@@ -43,25 +43,35 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
     let promote_threshold = user_settings.discovery_promote_threshold;
     let auto_delete = user_settings.auto_delete_enabled;
 
-    // Build music root candidates from the user's folder paths.
-    // Navidrome returns paths relative to its music library root.
-    // User folders are absolute (e.g. /music/Person1), so their parents
-    // (e.g. /music) are candidate roots for resolving song paths.
+    // Build music root candidates for resolving Navidrome's relative paths.
+    // Try multiple strategies: env var, folder paths, folder parents.
     let folders = crate::models::folder::Folder::get_all_by_user(user_id)
         .await
         .unwrap_or_default();
     let music_roots: Vec<std::path::PathBuf> = {
-        let mut roots: Vec<std::path::PathBuf> = folders
-            .iter()
-            .filter_map(|f| {
-                std::path::Path::new(&f.path)
-                    .parent()
-                    .map(|p| p.to_path_buf())
-            })
-            .collect();
+        let mut roots = Vec::new();
+        // 1. NAVIDROME_MUSIC_PATH env var (most reliable if set)
+        if let Ok(p) = std::env::var("NAVIDROME_MUSIC_PATH") {
+            if !p.is_empty() {
+                roots.push(std::path::PathBuf::from(p));
+            }
+        }
+        // 2. Each folder path directly (user folder might BE the music root)
+        for f in &folders {
+            roots.push(std::path::PathBuf::from(&f.path));
+        }
+        // 3. Parents of folder paths (e.g. /music from /music/Person1)
+        for f in &folders {
+            if let Some(parent) = std::path::Path::new(&f.path).parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
         roots.dedup();
         roots
     };
+    if music_roots.is_empty() {
+        warn!("No music roots found for user {} (no folders configured, no NAVIDROME_MUSIC_PATH)", user_id);
+    }
 
     let mut deleted_tracks = 0u32;
     let mut promoted_tracks = 0u32;
