@@ -339,22 +339,38 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                 }
             };
 
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            let search_result = match backend.poll_search(&search_id).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("Poll failed for '{}' - {}: {}", candidate.artist, candidate.track, e);
+            // Poll until we get results or the search times out (slskd search has 120s timeout).
+            // Each poll_search call long-polls for up to 10s internally.
+            let mut found_item = None;
+            for _ in 0..12 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                let search_result = match backend.poll_search(&search_id).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Poll failed for '{}' - {}: {}", candidate.artist, candidate.track, e);
+                        break;
+                    }
+                };
+
+                if !search_result.groups.is_empty() && !search_result.groups[0].items.is_empty() {
+                    found_item = Some(search_result.groups[0].items[0].clone());
+                    break;
+                }
+
+                // Search completed with no results
+                if !search_result.has_more {
+                    break;
+                }
+            }
+
+            let item = match found_item {
+                Some(item) => item,
+                None => {
+                    info!("No results for '{}' - {}, skipping", candidate.artist, candidate.track);
                     continue;
                 }
             };
-
-            if search_result.groups.is_empty() || search_result.groups[0].items.is_empty() {
-                info!("No results for '{}' - {}, skipping", candidate.artist, candidate.track);
-                continue;
-            }
-
-            let item = &search_result.groups[0].items[0];
-            let download_results = match backend.download(vec![item.clone()]).await {
+            let download_results = match backend.download(vec![item]).await {
                 Ok(r) => r,
                 Err(e) => {
                     warn!("Download failed for '{}' - {}: {}", candidate.artist, candidate.track, e);
