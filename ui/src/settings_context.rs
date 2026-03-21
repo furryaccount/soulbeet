@@ -92,17 +92,23 @@ impl Settings {
     }
 
     /// Update settings on the server and refresh local state.
-    pub async fn update(&mut self, update: UpdateUserSettings) -> Result<UserSettings, ServerFnError> {
+    pub async fn update(
+        &mut self,
+        update: UpdateUserSettings,
+    ) -> Result<UserSettings, ServerFnError> {
         let result = api::update_user_settings(update).await?;
         self.state.set(Some(result.clone()));
         Ok(result)
     }
 
     /// Convenience method to update just the last search type.
-    pub async fn set_last_search_type(&mut self, search_type: SearchType) -> Result<(), ServerFnError> {
+    pub async fn set_last_search_type(
+        &mut self,
+        search_type: SearchType,
+    ) -> Result<(), ServerFnError> {
         let update = UpdateUserSettings {
-            default_metadata_provider: None,
             last_search_type: Some(search_type.as_str().to_string()),
+            ..Default::default()
         };
         self.update(update).await?;
         Ok(())
@@ -125,10 +131,8 @@ pub fn use_settings() -> Settings {
 #[component]
 pub fn SettingsProvider(children: Element) -> Element {
     let settings_future = use_server_future(|| async move {
-        let (settings_result, providers_result) = futures::join!(
-            api::get_user_settings(),
-            api::get_metadata_providers(),
-        );
+        let (settings_result, providers_result) =
+            futures::join!(api::get_user_settings(), api::get_metadata_providers(),);
         (settings_result.ok(), providers_result.unwrap_or_default())
     })?;
 

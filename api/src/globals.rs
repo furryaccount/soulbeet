@@ -53,13 +53,17 @@ impl UserChannel {
 
     /// Update the last activity timestamp
     pub fn touch(&self) {
-        self.last_activity
-            .store(Self::current_timestamp(), std::sync::atomic::Ordering::Relaxed);
+        self.last_activity.store(
+            Self::current_timestamp(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Check if the channel has been idle for longer than the threshold
     pub fn is_stale(&self) -> bool {
-        let last = self.last_activity.load(std::sync::atomic::Ordering::Relaxed);
+        let last = self
+            .last_activity
+            .load(std::sync::atomic::Ordering::Relaxed);
         let now = Self::current_timestamp();
         now.saturating_sub(last) > CHANNEL_STALE_THRESHOLD_SECS
     }
@@ -108,7 +112,9 @@ pub async fn get_or_create_user_channel(
     username: &str,
 ) -> (broadcast::Sender<Vec<DownloadProgress>>, CancellationToken) {
     let mut map = USER_CHANNELS.write().await;
-    let channel = map.entry(username.to_string()).or_insert_with(UserChannel::new);
+    let channel = map
+        .entry(username.to_string())
+        .or_insert_with(UserChannel::new);
     (channel.sender.clone(), channel.cancellation_token.clone())
 }
 
@@ -116,7 +122,9 @@ pub async fn get_or_create_user_channel(
 #[cfg(feature = "server")]
 pub async fn register_user_task(username: &str) -> CancellationToken {
     let mut map = USER_CHANNELS.write().await;
-    let channel = map.entry(username.to_string()).or_insert_with(UserChannel::new);
+    let channel = map
+        .entry(username.to_string())
+        .or_insert_with(UserChannel::new);
     channel.add_task();
     channel.cancellation_token.clone()
 }
@@ -189,5 +197,114 @@ pub fn start_channel_cleanup_task() {
             "Started user channel cleanup task (interval: {}s, stale threshold: {}s)",
             CHANNEL_CLEANUP_INTERVAL_SECS, CHANNEL_STALE_THRESHOLD_SECS
         );
+
+        // Start the automation task (sync ratings, discovery)
+        tokio::spawn(async {
+            // Wait 30s for server to be fully ready
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(6 * 3600)); // 6 hours
+            loop {
+                interval.tick().await;
+                run_automation().await;
+            }
+        });
+        info!("Started automation task (interval: 6h)");
     });
+}
+
+#[cfg(feature = "server")]
+async fn run_automation() {
+    use crate::models::user::User;
+
+    // Run automation for each connected user
+    let connected_users = match User::get_connected_users().await {
+        Ok(users) => users,
+        Err(e) => {
+            info!("Automation: failed to get connected users: {}", e);
+            return;
+        }
+    };
+
+    if connected_users.is_empty() {
+        info!("Automation: no connected Navidrome users, skipping");
+        return;
+    }
+
+    // 1. Sync ratings for each connected user
+    for user in &connected_users {
+        info!("Automation: syncing ratings for user {}...", user.username);
+        match crate::server_fns::navidrome::sync_ratings_internal(&user.id).await {
+            Ok(result) => info!(
+                "Automation: sync complete for {} - {} scanned, {} deletions, {} promoted, {} removed",
+                user.username, result.total_songs_scanned, result.deleted_tracks,
+                result.promoted_tracks, result.removed_tracks
+            ),
+            Err(e) => info!("Automation: sync failed for {}: {}", user.username, e),
+        }
+    }
+
+    // 2. Regenerate recommendations for each user
+    for user in &connected_users {
+        match crate::server_fns::discovery::generate_recommendations_internal(&user.id).await {
+            Ok(count) => info!(
+                "Automation: generated {} candidates for user {}",
+                count, user.username
+            ),
+            Err(e) => info!(
+                "Automation: recommendation generation failed for {}: {}",
+                user.username, e
+            ),
+        }
+    }
+
+    // 3. Regenerate expired discovery playlists (per-user)
+    info!("Automation: checking for expired discovery playlists...");
+    match crate::models::user_settings::UserSettings::get_expired_discoveries().await {
+        Ok(expired_users) => {
+            for user_settings in expired_users {
+                let user_id = &user_settings.user_id;
+                info!(
+                    "Automation: discovery for user {} expired, regenerating...",
+                    user_id
+                );
+
+                // Clean up remaining pending tracks (delete files, mark as Removed)
+                if let Some(ref folder_id) = user_settings.discovery_folder_id {
+                    match crate::models::discovery_playlist::DiscoveryTrackRow::get_pending_by_folder(folder_id).await {
+                        Ok(pending) => {
+                            for track in pending {
+                                let path = std::path::Path::new(&track.path);
+                                if path.exists() {
+                                    let _ = tokio::fs::remove_file(path).await;
+                                }
+                                let _ = crate::models::discovery_playlist::DiscoveryTrackRow::update_status(
+                                    &track.id,
+                                    &shared::navidrome::DiscoveryStatus::Removed,
+                                ).await;
+                                crate::models::discovery_history::DiscoveryHistoryRow::update_outcome(
+                                    user_id, &track.artist, &track.title, "expired"
+                                ).await.ok();
+                            }
+                        }
+                        Err(e) => info!("Automation: failed to clean up pending tracks for user {}: {}", user_id, e),
+                    }
+                }
+
+                // Generate new discovery playlist
+                match crate::server_fns::discovery::generate_discovery_playlist_internal(user_id)
+                    .await
+                {
+                    Ok(count) => info!(
+                        "Automation: regenerated discovery for user {} with {} tracks",
+                        user_id, count
+                    ),
+                    Err(e) => info!(
+                        "Automation: discovery regeneration failed for user {}: {}",
+                        user_id, e
+                    ),
+                }
+            }
+        }
+        Err(e) => info!("Automation: failed to check expired discoveries: {}", e),
+    }
 }

@@ -7,12 +7,12 @@ use shared::system::BackendInfo;
 #[cfg(feature = "server")]
 use crate::services::{
     available_download_backends, available_importers, available_metadata_providers,
-    download_backend, music_importer,
+    download_backend, music_importer, navidrome_client_for_user,
 };
 #[cfg(feature = "server")]
 use crate::AuthSession;
 
-#[get("/api/system/health", _: AuthSession)]
+#[get("/api/system/health", auth: AuthSession)]
 pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
     #[cfg(feature = "server")]
     {
@@ -26,9 +26,15 @@ pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
             Err(_) => false,
         };
 
+        let navidrome_online = match navidrome_client_for_user(&auth.0.sub).await {
+            Ok(client) => client.ping().await.is_ok(),
+            Err(_) => false,
+        };
+
         Ok(SystemHealth {
             downloader_online,
             beets_ready,
+            navidrome_online,
         })
     }
     #[cfg(not(feature = "server"))]

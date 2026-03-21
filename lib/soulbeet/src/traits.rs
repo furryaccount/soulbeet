@@ -3,6 +3,10 @@ use shared::{
     download::{DownloadProgress, DownloadableItem, QueuedDownload, SearchResult},
     library::DuplicateReport,
     metadata::{Album, AlbumWithTracks, SearchResult as MetadataSearchResult, Track},
+    recommendation::{
+        ArtistPopularity, CandidateSet, Listen, ProfileConfig, RankedArtist, RankedTrack,
+        SignalReport, SimilarArtist, SimilarTrack, TimePeriod, UserMusicProfile, WeightedTag,
+    },
 };
 use std::path::Path;
 
@@ -139,4 +143,46 @@ impl MetadataProvider for FallbackMetadataProvider {
             message: "Album not found".to_string(),
         })
     }
+}
+
+#[async_trait]
+pub trait ScrobbleProvider: Send + Sync {
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
+
+    // Listening history
+    async fn get_listens(&self, count: u32) -> Result<Vec<Listen>>;
+    async fn get_top_artists(&self, period: TimePeriod, count: u32) -> Result<Vec<RankedArtist>>;
+    async fn get_top_tracks(&self, period: TimePeriod, count: u32) -> Result<Vec<RankedTrack>>;
+
+    // Metadata
+    async fn get_artist_tags(&self, artist: &str) -> Result<Vec<WeightedTag>>;
+    async fn get_artist_popularity(&self, artist: &str) -> Result<ArtistPopularity>;
+    async fn get_global_popularity_median(&self) -> Result<u64>;
+
+    // Similarity
+    async fn get_similar_artists(&self, artist: &str, limit: u32) -> Result<Vec<SimilarArtist>>;
+    async fn get_similar_tracks(
+        &self,
+        artist: &str,
+        track: &str,
+        limit: u32,
+    ) -> Result<Vec<SimilarTrack>>;
+
+    // Tag/genre exploration
+    async fn get_tag_top_tracks(&self, tag: &str, limit: u32) -> Result<Vec<RankedTrack>>;
+    async fn get_related_tags(&self, tag: &str) -> Result<Vec<String>>;
+
+    // Artist tracks
+    async fn get_artist_top_tracks(&self, artist: &str, limit: u32) -> Result<Vec<RankedTrack>>;
+}
+
+#[async_trait]
+pub trait CandidateGenerator: Send + Sync {
+    fn name(&self) -> &str;
+    async fn generate_candidates(
+        &self,
+        profile: &UserMusicProfile,
+        config: &ProfileConfig,
+    ) -> Result<(CandidateSet, Vec<SignalReport>)>;
 }

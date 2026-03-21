@@ -18,6 +18,8 @@ pub struct User {
     pub username: String,
     #[serde(skip)]
     pub password_hash: String,
+    pub navidrome_token: Option<String>,
+    pub navidrome_status: String,
 }
 
 #[cfg(feature = "server")]
@@ -33,7 +35,7 @@ impl User {
         let id = Uuid::new_v4().to_string();
 
         let user = sqlx::query_as::<_, User>(
-            "INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?) RETURNING id, username, password_hash"
+            "INSERT INTO users (id, username, password_hash, navidrome_status) VALUES (?, ?, ?, 'unknown') RETURNING *"
         )
         .bind(&id)
         .bind(username)
@@ -111,5 +113,35 @@ impl User {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub async fn get_by_username(username: &str) -> Result<Option<User>, String> {
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&*DB)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn update_navidrome_token(
+        id: &str,
+        token: Option<&str>,
+        status: &str,
+    ) -> Result<(), String> {
+        sqlx::query("UPDATE users SET navidrome_token = ?, navidrome_status = ? WHERE id = ?")
+            .bind(token)
+            .bind(status)
+            .bind(id)
+            .execute(&*DB)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn get_connected_users() -> Result<Vec<User>, String> {
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE navidrome_status = 'connected'")
+            .fetch_all(&*DB)
+            .await
+            .map_err(|e| e.to_string())
     }
 }

@@ -6,9 +6,11 @@ use shared::{
 };
 
 #[cfg(feature = "server")]
-use crate::{server_fns::server_error, AuthSession};
+use crate::models::user_settings::UserSettings;
 #[cfg(feature = "server")]
 use crate::services::{download_backend, metadata_provider};
+#[cfg(feature = "server")]
+use crate::{server_fns::server_error, AuthSession};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchQuery {
@@ -32,11 +34,15 @@ pub struct PollQuery {
     pub backend: Option<String>,
 }
 
-#[post("/api/metadata/search/album", _: AuthSession)]
+#[post("/api/metadata/search/album", auth: AuthSession)]
 pub async fn search_album(input: SearchQuery) -> Result<SearchResults, ServerFnError> {
-    let provider = metadata_provider(input.provider.as_deref())
-        .await
-        .map_err(server_error)?;
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
+    let provider = metadata_provider(
+        input.provider.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
+    )
+    .await
+    .map_err(server_error)?;
 
     let provider_enum: Provider = provider.id().parse().unwrap_or_default();
     let results = provider
@@ -50,11 +56,15 @@ pub async fn search_album(input: SearchQuery) -> Result<SearchResults, ServerFnE
     })
 }
 
-#[post("/api/metadata/search/track", _: AuthSession)]
+#[post("/api/metadata/search/track", auth: AuthSession)]
 pub async fn search_track(input: SearchQuery) -> Result<SearchResults, ServerFnError> {
-    let provider = metadata_provider(input.provider.as_deref())
-        .await
-        .map_err(server_error)?;
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
+    let provider = metadata_provider(
+        input.provider.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
+    )
+    .await
+    .map_err(server_error)?;
 
     let provider_enum: Provider = provider.id().parse().unwrap_or_default();
     let results = provider
@@ -68,12 +78,16 @@ pub async fn search_track(input: SearchQuery) -> Result<SearchResults, ServerFnE
     })
 }
 
-#[post("/api/metadata/album", _: AuthSession)]
+#[post("/api/metadata/album", auth: AuthSession)]
 pub async fn find_album(input: AlbumQuery) -> Result<AlbumWithTracks, ServerFnError> {
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
     let provider_str = input.provider.map(|p| p.to_string());
-    let provider = metadata_provider(provider_str.as_deref())
-        .await
-        .map_err(server_error)?;
+    let provider = metadata_provider(
+        provider_str.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
+    )
+    .await
+    .map_err(server_error)?;
 
     provider.get_album(&input.id).await.map_err(server_error)
 }

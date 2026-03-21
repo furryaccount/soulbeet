@@ -97,7 +97,10 @@ fn is_retryable_error(error: &musicbrainz_rs::Error) -> bool {
 /// Retries an async operation with exponential backoff and request timeout.
 /// Only retries transient errors (network issues, timeouts, 5xx responses).
 /// Does NOT retry client errors (4xx) or permanent failures.
-async fn with_retry<T, F, Fut>(operation_name: &str, mut operation: F) -> Result<T, musicbrainz_rs::Error>
+async fn with_retry<T, F, Fut>(
+    operation_name: &str,
+    mut operation: F,
+) -> Result<T, musicbrainz_rs::Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, musicbrainz_rs::Error>>,
@@ -105,11 +108,12 @@ where
     let mut last_error = None;
 
     for attempt in 0..MAX_RETRIES {
+        // Respect MusicBrainz rate limit (1 req/sec)
+        crate::http::mb_rate_limit().await;
+
         // Apply timeout to each request
-        let result = tokio::time::timeout(
-            Duration::from_secs(REQUEST_TIMEOUT_SECS),
-            operation()
-        ).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), operation()).await;
 
         match result {
             Ok(Ok(value)) => return Ok(value),
@@ -125,10 +129,7 @@ where
 
                 last_error = Some(e);
                 if attempt < MAX_RETRIES - 1 {
-                    let delay = std::cmp::min(
-                        BASE_DELAY_MS * 2u64.pow(attempt),
-                        MAX_BACKOFF_MS
-                    );
+                    let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_BACKOFF_MS);
                     warn!(
                         "{} failed (attempt {}/{}), retrying in {}ms: {:?}",
                         operation_name,
@@ -151,10 +152,7 @@ where
                 );
                 // Create a timeout error - we'll retry
                 if attempt < MAX_RETRIES - 1 {
-                    let delay = std::cmp::min(
-                        BASE_DELAY_MS * 2u64.pow(attempt),
-                        MAX_BACKOFF_MS
-                    );
+                    let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_BACKOFF_MS);
                     sleep(Duration::from_millis(delay)).await;
                 }
             }
@@ -223,7 +221,9 @@ pub async fn search(
             recordings.sort_by(|a, b| {
                 let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
                 let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
-                b_rating.partial_cmp(&a_rating).unwrap_or(std::cmp::Ordering::Equal)
+                b_rating
+                    .partial_cmp(&a_rating)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             let mut unique_tracks = HashSet::new();
@@ -285,7 +285,9 @@ pub async fn search(
             release_groups.sort_by(|a, b| {
                 let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
                 let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
-                b_rating.partial_cmp(&a_rating).unwrap_or(std::cmp::Ordering::Equal)
+                b_rating
+                    .partial_cmp(&a_rating)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             for release_group in release_groups {
@@ -430,9 +432,11 @@ impl crate::MetadataProvider for MusicBrainzProvider {
     }
 
     async fn get_album(&self, id: &str) -> crate::error::Result<AlbumWithTracks> {
-        find_album(id).await.map_err(|e| crate::error::SoulseekError::Api {
-            status: 500,
-            message: e.to_string(),
-        })
+        find_album(id)
+            .await
+            .map_err(|e| crate::error::SoulseekError::Api {
+                status: 500,
+                message: e.to_string(),
+            })
     }
 }

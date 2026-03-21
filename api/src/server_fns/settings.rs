@@ -18,20 +18,25 @@ pub async fn get_user_settings() -> Result<UserSettings, ServerFnError> {
 
 /// Update current user's settings
 #[post("/api/settings", auth: AuthSession)]
-pub async fn update_user_settings(update: UpdateUserSettings) -> Result<UserSettings, ServerFnError> {
+pub async fn update_user_settings(
+    update: UpdateUserSettings,
+) -> Result<UserSettings, ServerFnError> {
     UserSettings::upsert(&auth.0.sub, update)
         .await
         .map_err(server_error)
 }
 
 /// Get list of available metadata providers
-#[get("/api/settings/providers", _: AuthSession)]
+#[get("/api/settings/providers", auth: AuthSession)]
 pub async fn get_metadata_providers() -> Result<Vec<ProviderInfo>, ServerFnError> {
     use crate::services::{available_metadata_providers, metadata_provider};
 
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
     let mut providers = Vec::new();
     for (id, name) in available_metadata_providers() {
-        let available = metadata_provider(Some(id)).await.is_ok();
+        let available = metadata_provider(Some(id), user_settings.lastfm_api_key.as_deref())
+            .await
+            .is_ok();
         providers.push(ProviderInfo {
             id: id.to_string(),
             name: name.to_string(),
@@ -51,7 +56,6 @@ pub struct ProviderInfo {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct AppConfigValues {
-    pub lastfm_api_key: Option<String>,
     pub slskd_url: Option<String>,
     pub slskd_api_key: Option<String>,
 }
@@ -60,9 +64,6 @@ pub struct AppConfigValues {
 pub async fn get_app_config() -> Result<AppConfigValues, ServerFnError> {
     use crate::models::app_config::keys;
 
-    let lastfm_api_key = AppConfig::get(keys::LASTFM_API_KEY)
-        .await
-        .map_err(server_error)?;
     let slskd_url = AppConfig::get(keys::SLSKD_URL)
         .await
         .map_err(server_error)?;
@@ -71,7 +72,6 @@ pub async fn get_app_config() -> Result<AppConfigValues, ServerFnError> {
         .map_err(server_error)?;
 
     Ok(AppConfigValues {
-        lastfm_api_key,
         slskd_url,
         slskd_api_key,
     })
@@ -93,7 +93,6 @@ pub async fn update_app_config(config: AppConfigValues) -> Result<AppConfigValue
         Ok(())
     }
 
-    set_or_delete(keys::LASTFM_API_KEY, &config.lastfm_api_key).await?;
     set_or_delete(keys::SLSKD_URL, &config.slskd_url).await?;
     set_or_delete(keys::SLSKD_API_KEY, &config.slskd_api_key).await?;
 

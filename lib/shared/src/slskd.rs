@@ -476,7 +476,11 @@ impl From<AlbumResult> for crate::download::DownloadableGroup {
 
 impl From<FileEntry> for crate::download::DownloadProgress {
     fn from(entry: FileEntry) -> Self {
-        let state = entry.state.first().cloned().unwrap_or(DownloadState::Unknown("unknown".into()));
+        let state = entry
+            .state
+            .first()
+            .cloned()
+            .unwrap_or(DownloadState::Unknown("unknown".into()));
         Self {
             id: entry.id,
             source: entry.username,
@@ -525,7 +529,9 @@ impl From<DownloadResponse> for crate::download::QueuedDownload {
 impl crate::download::DownloadableItem {
     /// Convert back to slskd TrackResult for download
     pub fn to_slskd_track(&self) -> Option<TrackResult> {
-        let base: SearchResult = self.backend_data.as_ref()
+        let base: SearchResult = self
+            .backend_data
+            .as_ref()
             .and_then(|data| serde_json::from_str(data).ok())?;
         Some(TrackResult {
             base,

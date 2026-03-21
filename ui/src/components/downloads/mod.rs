@@ -14,7 +14,8 @@ pub struct DownloadsProps {
 
 #[component]
 pub fn Downloads(mut props: DownloadsProps) -> Element {
-    let mut active_downloads: Vec<DownloadProgress> = props.downloads.read().values().cloned().collect();
+    let mut active_downloads: Vec<DownloadProgress> =
+        props.downloads.read().values().cloned().collect();
     active_downloads.sort_by(|a, b| {
         a.state
             .partial_cmp(&b.state)
@@ -37,13 +38,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
 
     let errored_count = active_downloads
         .iter()
-        .filter(|f| {
-            matches!(
-                f.state,
-                DownloadState::Failed(_)
-                    | DownloadState::Cancelled
-            )
-        })
+        .filter(|f| matches!(f.state, DownloadState::Failed(_) | DownloadState::Cancelled))
         .count();
 
     let clear_finished = move |_| {

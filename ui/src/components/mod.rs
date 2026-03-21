@@ -1,5 +1,7 @@
 pub mod album;
 pub mod cover_art;
+pub mod dashboard;
+pub mod discovery;
 pub mod downloads;
 pub mod footer;
 pub mod login;

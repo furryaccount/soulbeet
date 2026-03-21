@@ -193,11 +193,23 @@ pub struct QueuedDownload {
 
 impl QueuedDownload {
     pub fn success(id: String, source: String, item: String, size: u64) -> Self {
-        Self { id, source, item, size, error: None }
+        Self {
+            id,
+            source,
+            item,
+            size,
+            error: None,
+        }
     }
 
     pub fn failed(id: String, source: String, item: String, error: String) -> Self {
-        Self { id, source, item, size: 0, error: Some(error) }
+        Self {
+            id,
+            source,
+            item,
+            size: 0,
+            error: Some(error),
+        }
     }
 
     pub fn is_success(&self) -> bool {

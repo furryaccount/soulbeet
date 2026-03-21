@@ -8,8 +8,8 @@ use dioxus::fullstack::WebSocketOptions;
 #[cfg(feature = "web")]
 use websocket::use_resilient_websocket;
 
-use ui::{Downloads, Layout, Navbar, SearchReset, SettingsProvider};
-use views::{LoginPage, SearchPage, SettingsPage};
+use ui::{Downloads, Layout, Navbar, SearchPrefill, SearchReset, SettingsProvider};
+use views::{DashboardPage, LoginPage, SearchPage, SettingsPage};
 
 mod auth;
 mod views;
@@ -26,6 +26,8 @@ pub enum Route {
         #[layout(WebNavbar)]
             #[route("/")]
             SearchPage {},
+            #[route("/dashboard")]
+            DashboardPage {},
             #[route("/settings")]
             SettingsPage {},
 }
@@ -99,7 +101,9 @@ fn WebNavbar() -> Element {
     #[allow(unused_mut)] // mutated in websocket callback (web feature only)
     let mut downloads = use_signal::<HashMap<String, DownloadProgress>>(HashMap::new);
 
+    let search_prefill = use_signal(|| None::<(String, String)>);
     use_context_provider(|| SearchReset(search_reset));
+    use_context_provider(|| SearchPrefill(search_prefill));
 
     #[cfg(feature = "web")]
     use_resilient_websocket(
@@ -137,6 +141,24 @@ fn WebNavbar() -> Element {
                             stroke_linejoin: "round",
                             stroke_width: "2",
                             d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
+                        }
+                    }
+                }
+                Link {
+                    class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
+                    active_class: "border-beet-accent",
+                    to: Route::DashboardPage {},
+                    span { class: "hidden md:block", "Dashboard" }
+                    svg {
+                        class: "md:hidden w-6 h-6",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        stroke_width: "1.5",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z",
                         }
                     }
                 }

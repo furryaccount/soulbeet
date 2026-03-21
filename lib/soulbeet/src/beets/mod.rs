@@ -125,11 +125,8 @@ pub async fn import(
     let mut child = cmd.spawn()?;
 
     // Wait with timeout, killing the process if it takes too long
-    let wait_result = tokio::time::timeout(
-        Duration::from_secs(IMPORT_TIMEOUT_SECS),
-        child.wait(),
-    )
-    .await;
+    let wait_result =
+        tokio::time::timeout(Duration::from_secs(IMPORT_TIMEOUT_SECS), child.wait()).await;
 
     match wait_result {
         Ok(Ok(status)) => {
@@ -379,7 +376,10 @@ impl crate::MusicImporter for BeetsImporter {
         target: &Path,
         as_album: bool,
     ) -> crate::error::Result<crate::ImportResult> {
-        let sources_str: Vec<String> = sources.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let sources_str: Vec<String> = sources
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
 
         match import(sources_str, target, as_album).await {
             Ok(result) => Ok(match result {
@@ -395,10 +395,7 @@ impl crate::MusicImporter for BeetsImporter {
         }
     }
 
-    async fn find_duplicates(
-        &self,
-        libraries: &[&Path],
-    ) -> crate::error::Result<DuplicateReport> {
+    async fn find_duplicates(&self, libraries: &[&Path]) -> crate::error::Result<DuplicateReport> {
         find_duplicates_across_libraries(libraries.to_vec())
             .await
             .map_err(|e| crate::error::SoulseekError::Api {

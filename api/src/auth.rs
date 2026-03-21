@@ -7,9 +7,9 @@ pub struct AuthResponse {
 }
 
 #[cfg(feature = "server")]
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-#[cfg(feature = "server")]
 use crate::config::CONFIG;
+#[cfg(feature = "server")]
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 
 pub static EXPIRATION_DAYS: i64 = 30;
 

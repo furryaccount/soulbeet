@@ -140,7 +140,14 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
     if !failed.is_empty() {
         let failed_entries: Vec<DownloadProgress> = failed
             .iter()
-            .map(|d| DownloadProgress::failed(d.id.clone(), d.source.clone(), d.item.clone(), d.error.clone().unwrap_or_default()))
+            .map(|d| {
+                DownloadProgress::failed(
+                    d.id.clone(),
+                    d.source.clone(),
+                    d.item.clone(),
+                    d.error.clone().unwrap_or_default(),
+                )
+            })
             .collect();
         let _ = tx.send(failed_entries);
     }

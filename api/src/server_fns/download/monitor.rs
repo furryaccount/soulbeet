@@ -219,12 +219,14 @@ impl DownloadMonitor {
     }
 
     /// Log any unmatched files for debugging.
-    fn log_unmatched_files(&self, downloads: &[DownloadProgress], batch_status: &[DownloadProgress]) {
+    fn log_unmatched_files(
+        &self,
+        downloads: &[DownloadProgress],
+        batch_status: &[DownloadProgress],
+    ) {
         if batch_status.len() < self.filenames.len() {
             for target in &self.filenames {
-                let found = downloads
-                    .iter()
-                    .any(|d| filenames_match(&d.item, target));
+                let found = downloads.iter().any(|d| filenames_match(&d.item, target));
                 if !found {
                     debug!("Unmatched file: {}", target);
                 }
@@ -265,7 +267,9 @@ impl DownloadMonitor {
 
                 // Check per-track timeout
                 if let Some(first_seen) = self.track_states[&key].first_seen {
-                    if first_seen.elapsed() > PER_TRACK_TIMEOUT && !is_terminal_state(&download.state) {
+                    if first_seen.elapsed() > PER_TRACK_TIMEOUT
+                        && !is_terminal_state(&download.state)
+                    {
                         warn!(
                             "Track timed out after {} minutes: {}",
                             first_seen.elapsed().as_secs() / 60,

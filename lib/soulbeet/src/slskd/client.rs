@@ -10,12 +10,7 @@ use shared::{
     metadata::{Album, Track},
     slskd::{AlbumResult, DownloadResponse, FileEntry, FlattenedFiles, SearchState, TrackResult},
 };
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::Arc,
-    time::Duration as StdDuration,
-};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration as StdDuration};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -669,7 +664,11 @@ impl SoulseekClient {
     ) -> Vec<DownloadResponse> {
         // Log the raw response for debugging (truncate if too long)
         let log_text = if resp_text.len() > 500 {
-            format!("{}... (truncated, {} bytes total)", &resp_text[..500], resp_text.len())
+            format!(
+                "{}... (truncated, {} bytes total)",
+                &resp_text[..500],
+                resp_text.len()
+            )
         } else {
             resp_text.to_string()
         };
@@ -747,7 +746,8 @@ impl SoulseekClient {
             // Not valid JSON - check for known text responses
             let lower = resp_text.to_lowercase();
 
-            if lower.contains("already") && (lower.contains("queue") || lower.contains("progress")) {
+            if lower.contains("already") && (lower.contains("queue") || lower.contains("progress"))
+            {
                 info!("slskd reports files already queued (text response)");
                 return all_success();
             }
@@ -776,7 +776,9 @@ impl SoulseekClient {
 
                 info!(
                     "slskd count response: {} enqueued, {} failed (batch: {} files)",
-                    enqueued, failed, batch.len()
+                    enqueued,
+                    failed,
+                    batch.len()
                 );
 
                 // Validate the counts make sense
@@ -978,7 +980,10 @@ impl crate::DownloadBackend for SoulseekClient {
         })
     }
 
-    async fn download(&self, items: Vec<shared::download::DownloadableItem>) -> Result<Vec<shared::download::QueuedDownload>> {
+    async fn download(
+        &self,
+        items: Vec<shared::download::DownloadableItem>,
+    ) -> Result<Vec<shared::download::QueuedDownload>> {
         let tracks: Vec<TrackResult> = items
             .into_iter()
             .filter_map(|item| item.to_slskd_track())

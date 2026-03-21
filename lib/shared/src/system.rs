@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct SystemHealth {
     pub downloader_online: bool,
     pub beets_ready: bool,
+    pub navidrome_online: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -29,24 +29,15 @@ impl Services {
     }
 
     pub fn list_metadata(&self) -> Vec<(&str, &str)> {
-        self.metadata
-            .values()
-            .map(|p| (p.id(), p.name()))
-            .collect()
+        self.metadata.values().map(|p| (p.id(), p.name())).collect()
     }
 
     pub fn list_downloads(&self) -> Vec<(&str, &str)> {
-        self.download
-            .values()
-            .map(|p| (p.id(), p.name()))
-            .collect()
+        self.download.values().map(|p| (p.id(), p.name())).collect()
     }
 
     pub fn list_importers(&self) -> Vec<(&str, &str)> {
-        self.importer
-            .values()
-            .map(|p| (p.id(), p.name()))
-            .collect()
+        self.importer.values().map(|p| (p.id(), p.name())).collect()
     }
 }
 

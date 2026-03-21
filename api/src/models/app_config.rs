@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use crate::db::DB;
 
 pub mod keys {
-    pub const LASTFM_API_KEY: &str = "lastfm_api_key";
     pub const SLSKD_API_KEY: &str = "slskd_api_key";
     pub const SLSKD_URL: &str = "slskd_url";
 }

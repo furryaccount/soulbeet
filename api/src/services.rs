@@ -1,12 +1,16 @@
 #[cfg(feature = "server")]
-use std::{collections::HashMap, sync::{Arc, LazyLock}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 
 #[cfg(feature = "server")]
 use soulbeet::{
     beets::BeetsImporter,
     musicbrainz::MusicBrainzProvider,
+    navidrome::NavidromeClientBuilder,
     slskd::{DownloadConfig, SoulseekClientBuilder},
-    DownloadBackend, LastFmProvider, MetadataProvider, MusicImporter,
+    DownloadBackend, LastFmProvider, MetadataProvider, MusicImporter, NavidromeClient,
 };
 #[cfg(feature = "server")]
 use tokio::sync::RwLock;
@@ -40,6 +44,10 @@ static MUSIC_IMPORTERS: LazyLock<RwLock<HashMap<String, Arc<dyn MusicImporter>>>
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[cfg(feature = "server")]
+static NAVIDROME_CLIENTS: LazyLock<RwLock<HashMap<String, Arc<NavidromeClient>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[cfg(feature = "server")]
 pub fn available_metadata_providers() -> Vec<(&'static str, &'static str)> {
     vec![
         (providers::MUSICBRAINZ, "MusicBrainz"),
@@ -58,16 +66,16 @@ pub fn available_importers() -> Vec<(&'static str, &'static str)> {
 }
 
 #[cfg(feature = "server")]
-async fn init_metadata_provider(id: &str) -> Result<Arc<dyn MetadataProvider>, String> {
+async fn init_metadata_provider(
+    id: &str,
+    lastfm_api_key: Option<&str>,
+) -> Result<Arc<dyn MetadataProvider>, String> {
     match id {
         providers::LASTFM => {
-            let api_key = AppConfig::get(keys::LASTFM_API_KEY)
-                .await?
+            let api_key = lastfm_api_key
+                .filter(|k| !k.is_empty())
                 .ok_or("Last.fm API key not configured")?;
-            if api_key.is_empty() {
-                return Err("Last.fm API key not configured".to_string());
-            }
-            Ok(Arc::new(LastFmProvider::new(api_key)))
+            Ok(Arc::new(LastFmProvider::new(api_key.to_string())))
         }
         _ => Ok(Arc::new(MusicBrainzProvider::new())),
     }
@@ -107,22 +115,35 @@ async fn init_download_backend(id: &str) -> Result<Arc<dyn DownloadBackend>, Str
 }
 
 #[cfg(feature = "server")]
-pub async fn metadata_provider(id: Option<&str>) -> Result<Arc<dyn MetadataProvider>, String> {
+pub async fn metadata_provider(
+    id: Option<&str>,
+    lastfm_api_key: Option<&str>,
+) -> Result<Arc<dyn MetadataProvider>, String> {
     let requested = id.unwrap_or(providers::MUSICBRAINZ);
 
-    if let Some(provider) = METADATA_PROVIDERS.read().await.get(requested) {
-        return Ok(provider.clone());
+    // Don't cache Last.fm providers since keys are per-user
+    if requested != providers::LASTFM {
+        if let Some(provider) = METADATA_PROVIDERS.read().await.get(requested) {
+            return Ok(provider.clone());
+        }
     }
 
-    let (key, provider) = match init_metadata_provider(requested).await {
+    let (key, provider) = match init_metadata_provider(requested, lastfm_api_key).await {
         Ok(p) => (requested.to_string(), p),
-        Err(_) if requested != providers::MUSICBRAINZ => {
-            (providers::MUSICBRAINZ.to_string(), init_metadata_provider(providers::MUSICBRAINZ).await?)
-        }
+        Err(_) if requested != providers::MUSICBRAINZ => (
+            providers::MUSICBRAINZ.to_string(),
+            init_metadata_provider(providers::MUSICBRAINZ, None).await?,
+        ),
         Err(e) => return Err(e),
     };
 
-    METADATA_PROVIDERS.write().await.insert(key, provider.clone());
+    // Only cache non-Last.fm providers
+    if key != providers::LASTFM {
+        METADATA_PROVIDERS
+            .write()
+            .await
+            .insert(key, provider.clone());
+    }
     Ok(provider)
 }
 
@@ -135,7 +156,10 @@ pub async fn download_backend(id: Option<&str>) -> Result<Arc<dyn DownloadBacken
     }
 
     let backend = init_download_backend(requested).await?;
-    DOWNLOAD_BACKENDS.write().await.insert(requested.to_string(), backend.clone());
+    DOWNLOAD_BACKENDS
+        .write()
+        .await
+        .insert(requested.to_string(), backend.clone());
     Ok(backend)
 }
 
@@ -156,8 +180,49 @@ pub async fn music_importer(id: Option<&str>) -> Result<Arc<dyn MusicImporter>, 
     }
 
     let importer = init_importer(requested)?;
-    MUSIC_IMPORTERS.write().await.insert(requested.to_string(), importer.clone());
+    MUSIC_IMPORTERS
+        .write()
+        .await
+        .insert(requested.to_string(), importer.clone());
     Ok(importer)
+}
+
+#[cfg(feature = "server")]
+pub async fn navidrome_client_for_user(user_id: &str) -> Result<Arc<NavidromeClient>, String> {
+    // Check cache first
+    if let Some(client) = NAVIDROME_CLIENTS.read().await.get(user_id) {
+        return Ok(client.clone());
+    }
+
+    let user = crate::models::user::User::get_by_id(user_id).await?;
+
+    let encrypted_token = user
+        .navidrome_token
+        .ok_or("Navidrome not configured for user")?;
+
+    let password = crate::crypto::decrypt(&encrypted_token)?;
+
+    let url = std::env::var("NAVIDROME_URL")
+        .map_err(|_| "NAVIDROME_URL environment variable not set".to_string())?;
+
+    let client = NavidromeClientBuilder::new()
+        .base_url(&url)
+        .username(&user.username)
+        .password(&password)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let client = Arc::new(client);
+    NAVIDROME_CLIENTS
+        .write()
+        .await
+        .insert(user_id.to_string(), client.clone());
+    Ok(client)
+}
+
+#[cfg(feature = "server")]
+pub async fn evict_navidrome_client(user_id: &str) {
+    NAVIDROME_CLIENTS.write().await.remove(user_id);
 }
 
 #[cfg(feature = "server")]
@@ -165,6 +230,7 @@ pub async fn reload_providers() {
     METADATA_PROVIDERS.write().await.clear();
     DOWNLOAD_BACKENDS.write().await.clear();
     MUSIC_IMPORTERS.write().await.clear();
+    NAVIDROME_CLIENTS.write().await.clear();
 }
 
 #[cfg(feature = "server")]

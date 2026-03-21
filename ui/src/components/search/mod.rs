@@ -2,7 +2,7 @@ pub mod album;
 pub mod context;
 pub mod track;
 
-pub use context::SearchReset;
+pub use context::{SearchPrefill, SearchReset};
 
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
@@ -37,6 +37,7 @@ pub fn Search() -> Element {
     let mut download_options = use_signal::<Option<Vec<DownloadableGroup>>>(|| None);
     let mut is_downloading = use_signal(|| false);
     let search_reset = try_use_context::<SearchReset>();
+    let search_prefill = try_use_context::<SearchPrefill>();
 
     let mut system_status = use_signal(SystemHealth::default);
 
@@ -114,8 +115,7 @@ pub fn Search() -> Element {
                         if let Some(list) = current {
                             for new_group in response.groups {
                                 if let Some(pos) = list.iter().position(|x| {
-                                    x.source == new_group.source
-                                        && x.group_id == new_group.group_id
+                                    x.source == new_group.source && x.group_id == new_group.group_id
                                 }) {
                                     // Safeguard against incomplete albums
                                     list[pos] = new_group;
@@ -183,6 +183,17 @@ pub fn Search() -> Element {
         }
         loading.set(false);
     };
+
+    use_effect(move || {
+        if let Some(mut prefill) = search_prefill {
+            if let Some((prefill_artist, prefill_query)) = (prefill.0)() {
+                artist.set(Some(prefill_artist));
+                search.set(prefill_query);
+                (prefill.0).set(None);
+                spawn(perform_search());
+            }
+        }
+    });
 
     let view_full_album = move |album_id: String, provider: Provider| async move {
         loading.set(true);

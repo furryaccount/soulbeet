@@ -38,7 +38,10 @@ pub fn PreferencesManager() -> Element {
             .unwrap_or(false);
 
         if is_unavailable {
-            error.set("Selected provider is not configured. Please set up the API key in the Config tab.".to_string());
+            error.set(
+                "Selected provider is not configured. Please set up the API key in the Config tab."
+                    .to_string(),
+            );
             return;
         }
 
@@ -46,7 +49,7 @@ pub fn PreferencesManager() -> Element {
 
         let update = api::UpdateUserSettings {
             default_metadata_provider: Some(selected_provider()),
-            last_search_type: None,
+            ..Default::default()
         };
 
         match settings.update(update).await {

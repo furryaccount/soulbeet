@@ -75,8 +75,5 @@ pub async fn get_folder_duplicates() -> Result<DuplicateReport, ServerFnError> {
     let paths: Vec<&Path> = folders.iter().map(|f| Path::new(&f.path)).collect();
 
     let importer = music_importer(None).await.map_err(server_error)?;
-    importer
-        .find_duplicates(&paths)
-        .await
-        .map_err(server_error)
+    importer.find_duplicates(&paths).await.map_err(server_error)
 }
