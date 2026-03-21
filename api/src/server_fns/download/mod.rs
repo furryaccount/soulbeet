@@ -23,7 +23,7 @@ use crate::services::download_backend;
 #[cfg(feature = "server")]
 pub mod import;
 #[cfg(feature = "server")]
-mod monitor;
+pub mod monitor;
 #[cfg(feature = "server")]
 pub mod process;
 #[cfg(feature = "server")]

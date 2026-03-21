@@ -302,7 +302,6 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
             track: String,
             album: Option<String>,
             slskd_filename: String,
-            key: String,
         }
         let mut queued: Vec<QueuedTrack> = Vec::new();
 
@@ -371,7 +370,6 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                         track: candidate.track.clone(),
                         album: candidate.album.clone(),
                         slskd_filename: dl.item.clone(),
-                        key,
                     });
                     DiscoveryCandidateRow::mark_used(
                         user_id,
