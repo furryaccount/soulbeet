@@ -151,17 +151,16 @@ impl ScrobbleProvider for ListenBrainzProvider {
     }
 
     async fn get_global_popularity_median(&self) -> Result<u64> {
-        // Fetch the top sitewide artist as a reference point.
-        // The "median" is approximated as half the top artist's listen count,
-        // since LB doesn't expose a real median endpoint.
-        let resp = self.client.get_sitewide_artists(1).await?;
-        let top_count = resp
-            .payload
-            .artists
-            .first()
-            .map(|a| a.listen_count)
-            .unwrap_or(0);
-        Ok(top_count / 2)
+        // Fetch sitewide top artists and use the artist near the middle as a
+        // realistic median reference. The old approach (top artist / 2) was
+        // orders of magnitude too high, making every user look maximally obscure.
+        let resp = self.client.get_sitewide_artists(200).await?;
+        let artists = &resp.payload.artists;
+        if artists.is_empty() {
+            return Ok(0);
+        }
+        let mid = artists.len() / 2;
+        Ok(artists[mid].listen_count)
     }
 
     async fn get_similar_artists(&self, artist: &str, limit: u32) -> Result<Vec<SimilarArtist>> {
@@ -229,43 +228,67 @@ impl ScrobbleProvider for ListenBrainzProvider {
             .get_artist_radio(&mbid, "easy", 3, limit)
             .await?;
 
+        let http_client = crate::http::build_client("soulful/0.1 (https://github.com/soulful)");
         let mut result = Vec::new();
         for (_artist_mbid, recordings) in resp {
             for rec in recordings {
-                let score = 1.0 - (result.len() as f64 / (limit as f64).max(1.0)).min(0.9);
-                result.push(SimilarTrack {
-                    artist: rec.similar_artist_name.unwrap_or_default(),
-                    track: rec.recording_mbid.clone().unwrap_or_default(),
-                    mbid: rec.recording_mbid,
-                    score,
-                });
                 if result.len() >= limit as usize {
                     return Ok(result);
                 }
+                let score = 1.0 - (result.len() as f64 / (limit as f64).max(1.0)).min(0.9);
+
+                // Resolve recording MBID to actual track name
+                let (track_name, track_mbid) = match &rec.recording_mbid {
+                    Some(rid) if !rid.is_empty() => {
+                        match crate::http::cached_recording_lookup(&http_client, rid).await {
+                            Ok(Some(info)) if !info.title.is_empty() => {
+                                (info.title, Some(rid.clone()))
+                            }
+                            _ => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+
+                result.push(SimilarTrack {
+                    artist: rec.similar_artist_name.unwrap_or_default(),
+                    track: track_name,
+                    mbid: track_mbid,
+                    score,
+                });
             }
         }
         Ok(result)
     }
 
     async fn get_tag_top_tracks(&self, tag: &str, limit: u32) -> Result<Vec<RankedTrack>> {
-        // LB tag radio returns only recording MBIDs without artist/track names.
-        // Resolving MBIDs to names requires expensive metadata lookups.
-        // The Last.fm pipeline handles tag exploration with richer data.
         let resp = self.client.get_tag_radio(tag, 0, 100, limit).await?;
 
-        // Return recordings with MBID as track name (best we can do without metadata resolution)
-        Ok(resp
-            .into_iter()
-            .take(limit as usize)
-            .filter_map(|r| {
-                r.recording_mbid.map(|mbid| RankedTrack {
-                    artist: String::new(),
-                    track: mbid.clone(),
-                    mbid: Some(mbid),
-                    play_count: r.percent as u64,
-                })
-            })
-            .collect())
+        let http_client = crate::http::build_client("soulful/0.1 (https://github.com/soulful)");
+        let mut tracks = Vec::new();
+
+        for rec in resp {
+            if tracks.len() >= limit as usize {
+                break;
+            }
+            let mbid = match rec.recording_mbid {
+                Some(ref id) if !id.is_empty() => id,
+                _ => continue,
+            };
+            match crate::http::cached_recording_lookup(&http_client, mbid).await {
+                Ok(Some(info)) if !info.artist.is_empty() && !info.title.is_empty() => {
+                    tracks.push(RankedTrack {
+                        artist: info.artist,
+                        track: info.title,
+                        mbid: Some(mbid.clone()),
+                        play_count: rec.percent as u64,
+                    });
+                }
+                _ => continue,
+            }
+        }
+
+        Ok(tracks)
     }
 
     async fn get_related_tags(&self, _tag: &str) -> Result<Vec<String>> {

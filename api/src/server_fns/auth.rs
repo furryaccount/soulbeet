@@ -151,6 +151,9 @@ pub async fn login(username: String, password: String) -> Result<AuthResponse, S
             .await
             .map_err(server_error)?;
 
+            // Evict cached client with stale credentials
+            evict_navidrome_client(&user.id).await;
+
             let token =
                 auth::create_token(user.id.clone(), user.username.clone()).map_err(server_error)?;
             cookies.add(build_auth_cookie(token));

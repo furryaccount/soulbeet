@@ -8,6 +8,17 @@ use shared::navidrome::DiscoveryStatus;
 use dioxus::logger::tracing::{info, warn};
 
 #[cfg(feature = "server")]
+use std::collections::HashMap;
+#[cfg(feature = "server")]
+use std::sync::{Arc, LazyLock};
+#[cfg(feature = "server")]
+use tokio::sync::Mutex;
+
+#[cfg(feature = "server")]
+static GENERATION_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "server")]
 use crate::models::discovery_playlist::DiscoveryTrackRow;
 #[cfg(feature = "server")]
 use crate::models::folder::Folder;
@@ -78,6 +89,10 @@ pub async fn promote_discovery_track(req: TrackActionRequest) -> Result<(), Serv
         .map_err(server_error)?
         .ok_or_else(|| server_error("Folder not found"))?;
 
+    if folder.user_id != auth.0.sub {
+        return Err(server_error("Not authorized to modify this track"));
+    }
+
     let src = std::path::PathBuf::from(&track.path);
     if !src.exists() {
         return Err(server_error(format!("File not found: {}", track.path)));
@@ -90,9 +105,19 @@ pub async fn promote_discovery_track(req: TrackActionRequest) -> Result<(), Serv
         .to_string();
     let dest = std::path::PathBuf::from(&folder.path).join(&filename);
 
-    tokio::fs::rename(&src, &dest)
-        .await
-        .map_err(|e| server_error(format!("Failed to move file: {}", e)))?;
+    if let Err(e) = tokio::fs::rename(&src, &dest).await {
+        // Fall back to copy+delete for cross-filesystem moves (EXDEV)
+        if e.raw_os_error() == Some(18) {
+            tokio::fs::copy(&src, &dest)
+                .await
+                .map_err(|e| server_error(format!("Failed to copy file: {}", e)))?;
+            tokio::fs::remove_file(&src)
+                .await
+                .map_err(|e| server_error(format!("Failed to remove source after copy: {}", e)))?;
+        } else {
+            return Err(server_error(format!("Failed to move file: {}", e)));
+        }
+    }
 
     DiscoveryTrackRow::update_status(&req.track_id, &DiscoveryStatus::Promoted)
         .await
@@ -115,6 +140,15 @@ pub async fn remove_discovery_track(req: TrackActionRequest) -> Result<(), Serve
         .await
         .map_err(server_error)?
         .ok_or_else(|| server_error("Track not found"))?;
+
+    let folder = Folder::get_by_id(&track.folder_id)
+        .await
+        .map_err(server_error)?
+        .ok_or_else(|| server_error("Folder not found"))?;
+
+    if folder.user_id != auth.0.sub {
+        return Err(server_error("Not authorized to modify this track"));
+    }
 
     let path = std::path::Path::new(&track.path);
     if path.exists() {
@@ -149,6 +183,18 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
     use crate::models::discovery_history::DiscoveryHistoryRow;
     use crate::services::download_backend;
 
+    // Acquire per-user lock to prevent concurrent generation
+    let user_lock = {
+        let mut locks = GENERATION_LOCKS.lock().await;
+        locks
+            .entry(user_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let Ok(_guard) = user_lock.try_lock() else {
+        return Err("Discovery generation already in progress".to_string());
+    };
+
     let settings = UserSettings::get(user_id).await?;
     if !settings.discovery_enabled {
         return Err("Discovery is not enabled".to_string());
@@ -163,7 +209,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
 
     let selected_profiles = parse_profiles(&settings.discovery_profiles);
     let tracks_per_profile =
-        (settings.discovery_track_count as usize) / selected_profiles.len().max(1);
+        ((settings.discovery_track_count as usize) / selected_profiles.len().max(1)).max(1);
 
     let backend = download_backend(None).await?;
     let discovery_path = folder.discovery_path();
@@ -289,7 +335,14 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                         &candidate.track,
                         &candidate.artist,
                         candidate.album.as_deref().unwrap_or(""),
-                        &format!("{}/{}", discovery_path, dl.item),
+                        &format!(
+                        "{}/{}",
+                        discovery_path,
+                        std::path::Path::new(&dl.item)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    ),
                         folder_id,
                         &profile_name,
                     )

@@ -93,8 +93,12 @@ impl ListenBrainzClient {
 
     // --- Listens ---
 
+    fn encoded_username(&self) -> String {
+        urlencoding(&self.username)
+    }
+
     pub async fn get_listens(&self, count: u32) -> Result<ListensResponse> {
-        let path = format!("/1/user/{}/listens?count={}", self.username, count);
+        let path = format!("/1/user/{}/listens?count={}", self.encoded_username(), count);
         self.get_json(&path, "listens").await
     }
 
@@ -109,7 +113,7 @@ impl ListenBrainzClient {
         let range = time_period_to_range(period);
         let path = format!(
             "/1/stats/user/{}/recordings?range={}&count={}",
-            username, range, count
+            urlencoding(username), range, count
         );
         self.get_json(&path, "top recordings").await
     }
@@ -124,7 +128,7 @@ impl ListenBrainzClient {
         let range = time_period_to_range(period);
         let path = format!(
             "/1/stats/user/{}/artists?range={}&count={}",
-            self.username, range, count
+            self.encoded_username(), range, count
         );
         self.get_json(&path, "top artists").await
     }
@@ -137,22 +141,23 @@ impl ListenBrainzClient {
         let range = time_period_to_range(period);
         let path = format!(
             "/1/stats/user/{}/recordings?range={}&count={}",
-            self.username, range, count
+            self.encoded_username(), range, count
         );
         self.get_json(&path, "top recordings").await
     }
 
     // --- Similar Users ---
 
-    pub async fn get_similar_users(&self) -> Result<SimilarUsersResponse> {
-        let path = format!("/1/user/{}/similar-users", self.username);
-        self.get_json(&path, "similar users").await
+    pub async fn get_similar_users(&self) -> Result<Vec<SimilarUser>> {
+        let path = format!("/1/user/{}/similar-users", self.encoded_username());
+        let raw: SimilarUsersRaw = self.get_json(&path, "similar users").await?;
+        Ok(raw.into_users())
     }
 
     // --- Recommendation Playlists ---
 
     pub async fn get_recommendation_playlists(&self) -> Result<RecommendationPlaylistsResponse> {
-        let path = format!("/1/user/{}/playlists/recommendations", self.username);
+        let path = format!("/1/user/{}/playlists/recommendations", self.encoded_username());
         self.get_json(&path, "recommendation playlists").await
     }
 

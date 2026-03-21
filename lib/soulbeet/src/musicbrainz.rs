@@ -150,7 +150,7 @@ where
                     attempt + 1,
                     MAX_RETRIES
                 );
-                // Create a timeout error - we'll retry
+                last_error = Some(musicbrainz_rs::Error::MaxRetriesExceeded);
                 if attempt < MAX_RETRIES - 1 {
                     let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_BACKOFF_MS);
                     sleep(Duration::from_millis(delay)).await;
@@ -159,19 +159,9 @@ where
         }
     }
 
-    // Return the last error or panic (should never happen since we always set last_error on timeout)
-    // If we somehow have no error, create a synthetic one
     match last_error {
         Some(e) => Err(e),
-        None => {
-            warn!(
-                "{} failed after {} retries with no recorded error (likely all timeouts)",
-                operation_name, MAX_RETRIES
-            );
-            // Re-run the operation one more time to get an error to return
-            // This is a fallback - shouldn't normally happen
-            operation().await
-        }
+        None => Err(musicbrainz_rs::Error::MaxRetriesExceeded),
     }
 }
 
@@ -408,7 +398,7 @@ impl crate::MetadataProvider for MusicBrainzProvider {
         limit: usize,
     ) -> crate::error::Result<Vec<SearchResult>> {
         let artist_opt = artist.map(String::from);
-        search(&artist_opt, query, SearchType::Album, limit as u8)
+        search(&artist_opt, query, SearchType::Album, limit.min(100) as u8)
             .await
             .map_err(|e| crate::error::SoulseekError::Api {
                 status: 500,
@@ -423,7 +413,7 @@ impl crate::MetadataProvider for MusicBrainzProvider {
         limit: usize,
     ) -> crate::error::Result<Vec<SearchResult>> {
         let artist_opt = artist.map(String::from);
-        search(&artist_opt, query, SearchType::Track, limit as u8)
+        search(&artist_opt, query, SearchType::Track, limit.min(100) as u8)
             .await
             .map_err(|e| crate::error::SoulseekError::Api {
                 status: 500,

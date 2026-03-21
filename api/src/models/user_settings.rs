@@ -230,12 +230,15 @@ impl UserSettings {
     /// Update the last generated timestamp for discovery
     pub async fn update_discovery_last_generated(user_id: &str) -> Result<(), String> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("UPDATE user_settings SET discovery_last_generated_at = ? WHERE user_id = ?")
-            .bind(&now)
-            .bind(user_id)
-            .execute(&*DB)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "INSERT INTO user_settings (user_id, discovery_last_generated_at) VALUES (?, ?)
+             ON CONFLICT(user_id) DO UPDATE SET discovery_last_generated_at = excluded.discovery_last_generated_at",
+        )
+        .bind(user_id)
+        .bind(&now)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 

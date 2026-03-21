@@ -18,14 +18,18 @@ Screenshots: [here](./screenshots)
 -   **Multiple Metadata Providers**: Choose between MusicBrainz (better for albums) or Last.fm (better for single tracks) in your user settings.
 -   **One-Click Download & Import**: Select an album (or just some tracks), choose your target folder, and Soulbeet handles the rest.
 -   **Automated Importing**: Automatically monitors downloads and uses the `beets` CLI to tag, organize, and move files to your specified music folder.
--   **User Management**: Multi-user support with private folders. Each user can manage their own music library paths. Or have a common folder.
+-   **Music Discovery**: Automatic music recommendations powered by Last.fm and ListenBrainz. The engine builds a profile of your taste, generates candidates through 7 independent signals (track similarity, artist chains, collaborative filtering, tag exploration, momentum detection, Troi playlists, artist radio), and downloads them into Navidrome playlists. Three discovery profiles (Conservative, Balanced, Adventurous) let you control how far from your comfort zone you want to go.
+-   **Navidrome Integration**: Discovery playlists sync directly to Navidrome. Rate tracks as you listen -- liked tracks get promoted into your library, disliked tracks get cleaned up automatically.
+-   **User Management**: Multi-user support with private folders and shared folders for families/friend groups. Each user has their own discovery profiles, listening history, and preferences.
 
 ## Architecture
 
 1.  **Soulbeet Web**: The main interface (Dioxus Fullstack).
 2.  **Slskd**: The Soulseek client backend. Soulbeet communicates with `slskd` to initiate and monitor downloads.
 3.  **Beets**: The music library manager. Soulbeet executes `beet import` to process finished downloads.
-4.  **SQLite**: Stores user accounts and folder configurations. (PostgreSQL compat can be added easily, maybe in the future)
+4.  **Navidrome**: Music streaming server. Soulbeet creates discovery playlists and syncs ratings for automatic track promotion/removal.
+5.  **Last.fm / ListenBrainz**: Scrobble services used by the recommendation engine to build user taste profiles and generate discovery candidates.
+6.  **SQLite**: Stores user accounts, folder configurations, discovery candidates, engine reports, and listening profiles.
 
 ## Self-Hosting with Docker
 
@@ -109,7 +113,8 @@ docker-compose up -d --build
 | `DOWNLOAD_PATH` | Path where downloads are saved | `/downloads` |
 | `BEETS_CONFIG` | Path to custom beets config file | `beets_config.yaml` |
 | `BEETS_ALBUM_MODE` | Enable album import mode (see below) | `false` |
-| `SECRET_KEY` | Used to encrypt tokens | |
+| `SECRET_KEY` | Used to encrypt tokens and Navidrome credentials | |
+| `NAVIDROME_URL` | Navidrome server URL (for discovery playlists and rating sync) | |
 
 **Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database.
 
@@ -193,13 +198,12 @@ match:
 ## TODO & Ideas
 
 - Mobile app (nothing much to do honestly)
-- Better scoring
 - Enhance the default beets configuration
 - Find a way to avoid album dups ? e.g `Clair Obscur_ Expedition 33 (Original Soundtrack)` & `Clair Obscur_ Expedition 33_ Original Soundtrack` - Rare but annoying
 - Add play preview on album track list
 - Improve slskd search. Currently:
   - Single track search, query: "{artist} {track_title}" -> more resilient
   - Multiple tracks search, query: "{artist} {album}" -> best for metadata and grouping tracks by album
-- Listenbrainz integration to autodownload suggestions
 - Complete library manager, removal of tracks
 - Synchronize a playlist (Spotify or other)
+- Populate release_year from MusicBrainz to activate the new-release boost in discovery

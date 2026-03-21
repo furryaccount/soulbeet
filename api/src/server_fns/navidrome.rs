@@ -56,31 +56,32 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                 if rating == 1 {
                     // For shared folders: skip deletion if the average rating
                     // across all Navidrome users is above 1 (someone else likes it)
-                    if let Some(avg) = song.average_rating {
-                        if avg > 1.0 {
-                            continue;
-                        }
-                    }
-                    if let Some(ref path_str) = song.path {
-                        let path = std::path::Path::new(path_str);
-                        if path.exists() {
-                            if let Err(e) = tokio::fs::remove_file(path).await {
-                                warn!("Auto-delete failed for {}: {}", path.display(), e);
-                            } else {
-                                if let Some(parent) = path.parent() {
-                                    let _ = cleanup_empty_dirs(parent).await;
+                    let shared_veto = song
+                        .average_rating
+                        .map(|avg| avg > 1.0)
+                        .unwrap_or(false);
+                    if !shared_veto {
+                        if let Some(ref path_str) = song.path {
+                            let path = std::path::Path::new(path_str);
+                            if path.exists() {
+                                if let Err(e) = tokio::fs::remove_file(path).await {
+                                    warn!("Auto-delete failed for {}: {}", path.display(), e);
+                                } else {
+                                    if let Some(parent) = path.parent() {
+                                        let _ = cleanup_empty_dirs(parent).await;
+                                    }
+                                    DeletionReviewRow::upsert(
+                                        &song.id,
+                                        &song.title,
+                                        song.artist.as_deref().unwrap_or("Unknown"),
+                                        song.album.as_deref().unwrap_or("Unknown"),
+                                        song.path.as_deref(),
+                                        Some(rating),
+                                        user_id,
+                                    )
+                                    .await?;
+                                    deleted_tracks += 1;
                                 }
-                                DeletionReviewRow::upsert(
-                                    &song.id,
-                                    &song.title,
-                                    song.artist.as_deref().unwrap_or("Unknown"),
-                                    song.album.as_deref().unwrap_or("Unknown"),
-                                    song.path.as_deref(),
-                                    Some(rating),
-                                    user_id,
-                                )
-                                .await?;
-                                deleted_tracks += 1;
                             }
                         }
                     }
@@ -248,9 +249,18 @@ async fn promote_discovery_track_internal(track_id: &str) -> Result<(), String> 
         .to_string();
     let dest = std::path::PathBuf::from(&folder.path).join(&filename);
 
-    tokio::fs::rename(&src, &dest)
-        .await
-        .map_err(|e| format!("Failed to move file: {}", e))?;
+    if let Err(e) = tokio::fs::rename(&src, &dest).await {
+        if e.raw_os_error() == Some(18) {
+            tokio::fs::copy(&src, &dest)
+                .await
+                .map_err(|e| format!("Failed to copy file: {}", e))?;
+            tokio::fs::remove_file(&src)
+                .await
+                .map_err(|e| format!("Failed to remove source after copy: {}", e))?;
+        } else {
+            return Err(format!("Failed to move file: {}", e));
+        }
+    }
 
     DiscoveryTrackRow::update_status(track_id, &DiscoveryStatus::Promoted).await?;
 

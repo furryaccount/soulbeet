@@ -25,7 +25,8 @@ const ARTIST_CACHE_LIMIT: usize = 100;
 pub(crate) struct ArtistCache {
     pub popularity: HashMap<String, u64>,
     pub genre: HashMap<String, String>,
-    fetch_count: usize,
+    popularity_fetches: usize,
+    genre_fetches: usize,
 }
 
 impl ArtistCache {
@@ -33,7 +34,8 @@ impl ArtistCache {
         Self {
             popularity: HashMap::new(),
             genre: HashMap::new(),
-            fetch_count: 0,
+            popularity_fetches: 0,
+            genre_fetches: 0,
         }
     }
 
@@ -46,11 +48,11 @@ impl ArtistCache {
         if let Some(&count) = self.popularity.get(&key) {
             return Some(count);
         }
-        if self.fetch_count >= ARTIST_CACHE_LIMIT {
+        if self.popularity_fetches >= ARTIST_CACHE_LIMIT {
             return None;
         }
         if let Ok(pop) = provider.get_artist_popularity(artist).await {
-            self.fetch_count += 1;
+            self.popularity_fetches += 1;
             self.popularity.insert(key, pop.listener_count);
             return Some(pop.listener_count);
         }
@@ -66,11 +68,11 @@ impl ArtistCache {
         if let Some(genre) = self.genre.get(&key) {
             return Some(genre.clone());
         }
-        if self.fetch_count >= ARTIST_CACHE_LIMIT {
+        if self.genre_fetches >= ARTIST_CACHE_LIMIT {
             return None;
         }
         if let Ok(tags) = provider.get_artist_tags(artist).await {
-            self.fetch_count += 1;
+            self.genre_fetches += 1;
             if let Some(top) = tags.first() {
                 self.genre.insert(key, top.name.clone());
                 return Some(top.name.clone());
@@ -136,7 +138,7 @@ pub async fn recommend(
     for generator in generators {
         // Per-pipeline timeout: 2 minutes max
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(120),
             generator.generate_candidates(profile, config),
         )
         .await;
@@ -144,7 +146,7 @@ pub async fn recommend(
         let result = match result {
             Ok(r) => r,
             Err(_) => {
-                warn!("Generator '{}' timed out after 3600s", generator.name());
+                warn!("Generator '{}' timed out after 120s", generator.name());
                 report.pipeline_reports.push(PipelineReport {
                     name: format!("{} (TIMEOUT)", generator.name()),
                     signals: vec![],
@@ -190,6 +192,9 @@ pub async fn recommend(
     info!("After blending: {} candidates", blended.len());
     report.blend_summary = blend_summary;
 
+    // Step 2.5: Enrich top candidates with release year from MusicBrainz
+    enrich_release_years(&mut blended, target_count * 3).await;
+
     // Step 3: Freshness
     let known_artists = collect_known_artists(providers).await;
     let freshness_summary =
@@ -208,11 +213,11 @@ pub async fn recommend(
     Ok((result, report))
 }
 
-/// Build a user profile from the best available provider, then run the pipeline.
+/// Build a user profile by merging data from all available providers, then run the pipeline.
 ///
-/// Tries each provider in order and uses the first one that returns meaningful
-/// data (at least 1 top artist). This handles the case where a user has data
-/// on Last.fm but not ListenBrainz (or vice versa).
+/// Uses the first provider with meaningful data as the primary source, then
+/// enriches the profile with data from additional providers (extra genres,
+/// momentum artists, known artists/tracks).
 pub async fn build_and_recommend(
     providers: &[Arc<dyn ScrobbleProvider>],
     generators: &[Arc<dyn CandidateGenerator>],
@@ -221,7 +226,8 @@ pub async fn build_and_recommend(
     target_count: usize,
 ) -> Result<(UserMusicProfile, Vec<Candidate>, EngineReport)> {
     let mut profile = UserMusicProfile::default();
-    let mut profile_source = String::from("none");
+    let mut profile_sources: Vec<String> = Vec::new();
+
     for provider in providers {
         info!("Trying profile build from {}", provider.name());
         match build_profile(provider.as_ref()).await {
@@ -232,29 +238,92 @@ pub async fn build_and_recommend(
                     p.genre_distribution.len(),
                     p.momentum_artists.len()
                 );
-                profile_source = provider.name().to_string();
-                profile = p;
-                break;
+                if profile_sources.is_empty() {
+                    // First provider becomes the base profile
+                    profile = p;
+                } else {
+                    // Merge additional provider data into existing profile
+                    merge_profile(&mut profile, &p);
+                }
+                profile_sources.push(provider.name().to_string());
             }
             Ok(_) => {
                 info!(
-                    "{} returned empty profile, trying next provider",
+                    "{} returned empty profile, skipping",
                     provider.name()
                 );
             }
             Err(e) => {
                 warn!(
-                    "Profile build from {} failed: {}, trying next",
+                    "Profile build from {} failed: {}, skipping",
                     provider.name(),
                     e
                 );
             }
         }
     }
+
+    let profile_source = if profile_sources.is_empty() {
+        "none".to_string()
+    } else {
+        profile_sources.join("+")
+    };
+
     let (recommendations, mut report) =
         recommend(providers, generators, &profile, config, target_count).await?;
     report.profile_source = profile_source;
     Ok((profile, recommendations, report))
+}
+
+/// Merge a secondary profile into the primary, adding new data without replacing.
+fn merge_profile(primary: &mut UserMusicProfile, secondary: &UserMusicProfile) {
+    // Merge genre distribution: add new genres, boost existing ones
+    let mut genre_map: HashMap<String, f64> = primary
+        .genre_distribution
+        .iter()
+        .map(|t| (t.name.clone(), t.weight))
+        .collect();
+    for tag in &secondary.genre_distribution {
+        let entry = genre_map.entry(tag.name.clone()).or_default();
+        *entry += tag.weight * 0.5; // secondary provider contributes at half weight
+    }
+    // Re-normalize
+    let total: f64 = genre_map.values().sum();
+    if total > 0.0 {
+        let mut tags: Vec<_> = genre_map
+            .into_iter()
+            .map(|(name, w)| shared::recommendation::WeightedTag {
+                name,
+                weight: w / total,
+            })
+            .collect();
+        tags.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
+        primary.genre_distribution = tags;
+    }
+
+    // Merge momentum artists: add new ones not already present
+    let existing: HashSet<String> = primary
+        .momentum_artists
+        .iter()
+        .map(|a| a.name.to_lowercase())
+        .collect();
+    for ma in &secondary.momentum_artists {
+        if !existing.contains(&ma.name.to_lowercase()) {
+            primary.momentum_artists.push(ma.clone());
+        }
+    }
+    primary.momentum_artists.truncate(15);
+
+    // Merge known artists/tracks (union)
+    let mut known_artists: HashSet<String> =
+        primary.known_artist_names.iter().cloned().collect();
+    known_artists.extend(secondary.known_artist_names.iter().cloned());
+    primary.known_artist_names = known_artists.into_iter().collect();
+
+    let mut known_tracks: HashSet<String> =
+        primary.known_track_keys.iter().cloned().collect();
+    known_tracks.extend(secondary.known_track_keys.iter().cloned());
+    primary.known_track_keys = known_tracks.into_iter().collect();
 }
 
 /// Collect a set of known artist names (lowercased) from all providers.
@@ -277,4 +346,58 @@ async fn collect_known_artists(providers: &[Arc<dyn ScrobbleProvider>]) -> HashS
         }
     }
     known
+}
+
+/// Enrich the top candidates with release year from MusicBrainz recording lookups.
+/// Only looks up candidates that have a recording MBID and no release_year yet.
+/// Limited to `max_lookups` to keep API calls bounded.
+async fn enrich_release_years(candidates: &mut CandidateSet, max_lookups: usize) {
+    let client = crate::http::build_client("soulful/0.1 (https://github.com/soulful)");
+
+    // Sort by score descending and only enrich the top candidates
+    let mut by_score: Vec<String> = candidates.candidates.keys().cloned().collect();
+    by_score.sort_by(|a, b| {
+        let sa = candidates.candidates.get(a).map(|c| c.score).unwrap_or(0.0);
+        let sb = candidates.candidates.get(b).map(|c| c.score).unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut lookups = 0usize;
+    for key in by_score {
+        if lookups >= max_lookups {
+            break;
+        }
+        let candidate = match candidates.candidates.get(&key) {
+            Some(c) => c,
+            None => continue,
+        };
+        if candidate.release_year.is_some() {
+            continue;
+        }
+        let mbid = match &candidate.mbid {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => continue,
+        };
+
+        lookups += 1;
+        if let Ok(Some(info)) = crate::http::cached_recording_lookup(&client, &mbid).await {
+            if let Some(year) = info.release_year {
+                if let Some(c) = candidates.candidates.get_mut(&key) {
+                    c.release_year = Some(year);
+                }
+            }
+        }
+    }
+
+    if lookups > 0 {
+        let filled = candidates
+            .candidates
+            .values()
+            .filter(|c| c.release_year.is_some())
+            .count();
+        info!(
+            "Release year enrichment: {} lookups, {} candidates now have years",
+            lookups, filled
+        );
+    }
 }

@@ -28,11 +28,7 @@ impl ListenBrainzPipeline {
     }
 
     fn known_artists(profile: &UserMusicProfile) -> HashSet<String> {
-        let mut set = HashSet::new();
-        for ma in &profile.momentum_artists {
-            set.insert(ma.name.to_lowercase());
-        }
-        set
+        profile.known_artist_names.iter().cloned().collect()
     }
 
     fn cap(set: &mut CandidateSet) {
@@ -62,7 +58,7 @@ impl ListenBrainzPipeline {
         let mut candidates = CandidateSet::new();
 
         let similar_users = match self.provider.client().get_similar_users().await {
-            Ok(resp) => resp.payload,
+            Ok(users) => users,
             Err(e) => {
                 warn!("Failed to fetch similar users: {}", e);
                 return candidates;
@@ -302,12 +298,15 @@ impl ListenBrainzPipeline {
                     .get_popularity(self.provider.as_ref(), &track.artist)
                     .await;
                 let primary_genre = cache.get_genre(self.provider.as_ref(), &track.artist).await;
+                // Floor at 0.15 so exploration candidates can compete in greedy
+                // selection instead of relying entirely on backfill
+                let score = WEIGHT_GENRE_EXPLORE.max(0.15);
                 candidates.insert(Candidate {
                     artist: track.artist,
                     track: track.track,
                     album: None,
                     mbid: track.mbid,
-                    score: WEIGHT_GENRE_EXPLORE,
+                    score,
                     signals: vec!["lb_genre_explore".to_string()],
                     source: "listenbrainz".to_string(),
                     artist_listener_count,

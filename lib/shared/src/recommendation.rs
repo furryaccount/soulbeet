@@ -153,12 +153,16 @@ pub struct UserMusicProfile {
     pub genre_distribution: Vec<WeightedTag>,
     pub era_preference: Vec<(String, f64)>, // decade label -> weight
     pub obscurity_score: f64,               // 0.0 = mainstream, 1.0 = deep cuts
-    pub repeat_ratio: f64,                  // fraction of listens that are repeats
+    pub repeat_ratio: f64,                  // 0.0 = all repeats, 1.0 = all unique tracks
     pub freshness_half_life_days: f64,      // how fast user moves on from artists
     pub momentum_artists: Vec<MomentumArtist>,
     pub tag_comfort_zone: Vec<String>,
     pub tag_exploration_zone: Vec<String>,
     pub top_artists_hash: String, // hash to detect profile staleness
+    #[serde(default)]
+    pub known_artist_names: Vec<String>, // lowercased top artist names for filtering
+    #[serde(default)]
+    pub known_track_keys: Vec<String>, // "artist:track" lowercased keys for filtering
 }
 
 /// An artist with momentum (gaining in recent listening vs all-time)
@@ -264,7 +268,7 @@ pub struct ProfileSummary {
     pub genre_count: usize,
     pub top_genres: Vec<String>,
     pub obscurity_score: f64,
-    pub repeat_ratio: f64,
+    pub repeat_ratio: f64, // actually uniqueness ratio: 0.0 = all repeats, 1.0 = all unique
     pub freshness_half_life_days: f64,
     pub momentum_artists: Vec<String>,
     pub comfort_tags: usize,

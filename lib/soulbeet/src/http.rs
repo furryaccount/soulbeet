@@ -155,9 +155,11 @@ pub async fn cached_mbid_lookup(client: &Client, artist: &str) -> Result<Option<
     // Rate limit, then fetch
     mb_rate_limit().await;
 
+    // Wrap in double quotes to escape Lucene special chars (AC/DC, Guns N' Roses, etc.)
+    let quoted = format!("\"{}\"", artist.replace('"', "\\\""));
     let url = format!(
         "https://musicbrainz.org/ws/2/artist/?query=artist:{}&fmt=json&limit=1",
-        url::form_urlencoded::byte_serialize(artist.as_bytes()).collect::<String>()
+        url::form_urlencoded::byte_serialize(quoted.as_bytes()).collect::<String>()
     );
 
     let client_clone = client.clone();
@@ -210,4 +212,132 @@ pub async fn cached_mbid_lookup(client: &Client, artist: &str) -> Result<Option<
     // Cache the result
     MBID_CACHE.lock().await.insert(key, result.clone());
     Ok(result)
+}
+
+// --- Recording metadata cache (resolves MBIDs to artist + track + year) ---
+
+#[derive(Clone, Debug)]
+pub struct RecordingInfo {
+    pub artist: String,
+    pub title: String,
+    pub release_year: Option<u16>,
+}
+
+static RECORDING_CACHE: LazyLock<Mutex<HashMap<String, Option<RecordingInfo>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Look up a recording by MBID, returning artist name, track title, and earliest release year.
+pub async fn cached_recording_lookup(
+    client: &Client,
+    mbid: &str,
+) -> Result<Option<RecordingInfo>> {
+    {
+        let cache = RECORDING_CACHE.lock().await;
+        if let Some(cached) = cache.get(mbid) {
+            return Ok(cached.clone());
+        }
+    }
+
+    mb_rate_limit().await;
+
+    let url = format!(
+        "https://musicbrainz.org/ws/2/recording/{}?inc=artist-credits+releases&fmt=json",
+        mbid
+    );
+
+    let client_clone = client.clone();
+    let url_clone = url.clone();
+    let resp = match resilient_send(
+        || client_clone.get(&url_clone),
+        &format!("MB recording {}", mbid),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("MusicBrainz recording lookup failed for '{}': {}", mbid, e);
+            RECORDING_CACHE.lock().await.insert(mbid.to_string(), None);
+            return Ok(None);
+        }
+    };
+
+    if !resp.status().is_success() {
+        RECORDING_CACHE.lock().await.insert(mbid.to_string(), None);
+        return Ok(None);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MbRecording {
+        #[serde(default)]
+        title: String,
+        #[serde(default, rename = "artist-credit")]
+        artist_credit: Vec<MbArtistCredit>,
+        #[serde(default)]
+        releases: Vec<MbRelease>,
+    }
+    #[derive(serde::Deserialize)]
+    struct MbArtistCredit {
+        artist: MbCreditArtist,
+        #[serde(default)]
+        joinphrase: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct MbCreditArtist {
+        name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct MbRelease {
+        #[serde(default)]
+        date: Option<String>,
+    }
+
+    let data: MbRecording = match resp.json().await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to parse MB recording response: {}", e);
+            RECORDING_CACHE.lock().await.insert(mbid.to_string(), None);
+            return Ok(None);
+        }
+    };
+
+    if data.title.is_empty() || data.artist_credit.is_empty() {
+        RECORDING_CACHE.lock().await.insert(mbid.to_string(), None);
+        return Ok(None);
+    }
+
+    // Build full artist name from credits (e.g. "Artist A feat. Artist B")
+    let artist = data
+        .artist_credit
+        .iter()
+        .enumerate()
+        .map(|(i, ac)| {
+            let mut s = ac.artist.name.clone();
+            if let Some(ref jp) = ac.joinphrase {
+                s.push_str(jp);
+            } else if i < data.artist_credit.len() - 1 {
+                s.push_str(", ");
+            }
+            s
+        })
+        .collect::<String>();
+
+    // Find earliest release year
+    let release_year = data
+        .releases
+        .iter()
+        .filter_map(|r| r.date.as_ref())
+        .filter_map(|d| d.split('-').next()?.parse::<u16>().ok())
+        .min();
+
+    let info = RecordingInfo {
+        artist,
+        title: data.title,
+        release_year,
+    };
+
+    RECORDING_CACHE
+        .lock()
+        .await
+        .insert(mbid.to_string(), Some(info.clone()));
+    Ok(Some(info))
 }

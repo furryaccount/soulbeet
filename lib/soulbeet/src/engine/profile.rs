@@ -122,7 +122,17 @@ pub async fn build_profile(provider: &dyn ScrobbleProvider) -> Result<UserMusicP
     // --- Step 7: Tag zones ---
     build_tag_zones(&mut profile, provider).await;
 
-    // --- Step 8: Top artists hash ---
+    // --- Step 8: Known artists and tracks for pipeline filtering ---
+    profile.known_artist_names = top_artists_alltime
+        .iter()
+        .map(|a| a.name.to_lowercase())
+        .collect();
+    profile.known_track_keys = top_tracks_alltime
+        .iter()
+        .map(|t| format!("{}:{}", t.artist.to_lowercase(), t.track.to_lowercase()))
+        .collect();
+
+    // --- Step 9: Top artists hash ---
     let top_names: Vec<String> = top_artists_alltime
         .iter()
         .take(20)
@@ -346,10 +356,10 @@ async fn build_tag_zones(profile: &mut UserMusicProfile, provider: &dyn Scrobble
 
     for tag in &profile.genre_distribution {
         if cumulative < 0.60 {
-            comfort.push(tag.name.clone());
+            comfort.push(tag.name.to_lowercase());
         } else if tag.weight > 0.001 {
             // Bottom 40% of meaningful tags
-            exploration.push(tag.name.clone());
+            exploration.push(tag.name.to_lowercase());
         }
         cumulative += tag.weight;
     }

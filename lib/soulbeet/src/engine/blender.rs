@@ -5,8 +5,10 @@ use tracing::info;
 use shared::recommendation::{BlendSummary, CandidateSet, CandidateSnapshot, ProfileConfig};
 
 /// Default blend weights when both sources are present.
-const LB_WEIGHT: f64 = 0.6;
-const LFM_WEIGHT: f64 = 0.4;
+/// Both have 4 working signals each. Last.fm gets slightly higher weight
+/// because its tag data and similarity scores are generally richer.
+const LB_WEIGHT: f64 = 0.45;
+const LFM_WEIGHT: f64 = 0.55;
 
 /// Merge candidate sets from multiple generator sources.
 ///

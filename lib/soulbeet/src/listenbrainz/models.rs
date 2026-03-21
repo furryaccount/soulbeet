@@ -82,9 +82,34 @@ pub struct LbRecording {
 
 // --- Similar Users ---
 
+/// The LB API returns `{"payload": [{"user_name": "...", "similarity": 0.19}, ...]}`
 #[derive(Debug, Deserialize, Default)]
 pub struct SimilarUsersResponse {
+    #[serde(default)]
     pub payload: Vec<SimilarUser>,
+}
+
+/// Alternative: some LB versions return a bare array. Try both shapes.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SimilarUsersRaw {
+    Wrapped(SimilarUsersResponse),
+    Bare(Vec<SimilarUser>),
+}
+
+impl Default for SimilarUsersRaw {
+    fn default() -> Self {
+        Self::Wrapped(SimilarUsersResponse::default())
+    }
+}
+
+impl SimilarUsersRaw {
+    pub fn into_users(self) -> Vec<SimilarUser> {
+        match self {
+            Self::Wrapped(w) => w.payload,
+            Self::Bare(v) => v,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

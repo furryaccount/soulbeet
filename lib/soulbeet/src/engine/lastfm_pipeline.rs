@@ -26,24 +26,12 @@ impl LastFmPipeline {
         Self { provider }
     }
 
-    /// Collect known artist and track keys from the profile for filtering.
-    fn known_tracks(_profile: &UserMusicProfile) -> HashSet<String> {
-        // We don't have the user's full track list in the profile struct,
-        // but we can approximate with the comfort-zone artists.
-        // The caller should pass in known data from a separate fetch if needed.
-        HashSet::new()
+    fn known_tracks(profile: &UserMusicProfile) -> HashSet<String> {
+        profile.known_track_keys.iter().cloned().collect()
     }
 
     fn known_artists(profile: &UserMusicProfile) -> HashSet<String> {
-        let mut set = HashSet::new();
-        for tag in &profile.tag_comfort_zone {
-            // comfort zone contains tags, not artists -- but we use momentum + top artists
-            let _ = tag;
-        }
-        for ma in &profile.momentum_artists {
-            set.insert(ma.name.to_lowercase());
-        }
-        set
+        profile.known_artist_names.iter().cloned().collect()
     }
 
     /// Truncate a candidate set to the per-signal cap.
@@ -316,7 +304,9 @@ impl LastFmPipeline {
                     continue;
                 }
 
-                let score = WEIGHT_TAG_EXPLORE * tag_w;
+                // Floor at 0.15 so exploration candidates can compete in greedy
+                // selection instead of relying entirely on backfill
+                let score = (WEIGHT_TAG_EXPLORE * tag_w).max(0.15);
                 let artist_listener_count = cache
                     .get_popularity(self.provider.as_ref(), &track.artist)
                     .await;

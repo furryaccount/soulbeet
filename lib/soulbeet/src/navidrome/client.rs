@@ -115,7 +115,9 @@ impl NavidromeClientBuilder {
 
     pub fn build(self) -> Result<NavidromeClient> {
         let base_url_str = self.base_url.ok_or(SoulseekError::NotConfigured)?;
-        let base_url = Url::parse(base_url_str.trim_end_matches('/'))?;
+        let mut normalized = base_url_str.trim_end_matches('/').to_string();
+        normalized.push('/');
+        let base_url = Url::parse(&normalized)?;
         let username = self.username.ok_or_else(|| SoulseekError::Api {
             status: 0,
             message: "Navidrome username not configured".to_string(),
@@ -202,10 +204,7 @@ impl NavidromeClient {
         debug!("Navidrome GET {}", endpoint);
 
         let response = match self.client.get(url).send().await {
-            Ok(resp) => {
-                self.circuit_breaker.record_success().await;
-                resp
-            }
+            Ok(resp) => resp,
             Err(e) => {
                 self.circuit_breaker.record_failure().await;
                 return Err(SoulseekError::Api {
@@ -216,11 +215,14 @@ impl NavidromeClient {
         };
 
         if !response.status().is_success() {
+            self.circuit_breaker.record_failure().await;
             return Err(SoulseekError::Api {
                 status: response.status().as_u16(),
                 message: format!("Navidrome HTTP error: {}", response.status()),
             });
         }
+
+        self.circuit_breaker.record_success().await;
 
         let envelope: SubsonicEnvelope<T> =
             response.json().await.map_err(|e| SoulseekError::Api {
@@ -363,7 +365,7 @@ impl NavidromeClient {
                 self.circuit_breaker.record_failure().await;
                 return Err(SoulseekError::Api {
                     status: 503,
-                    message: format!("Navidrome request failed: {}", e),
+                    message: format!("Navidrome create playlist failed: {}", e),
                 });
             }
         };
@@ -440,7 +442,7 @@ impl NavidromeClient {
                 self.circuit_breaker.record_failure().await;
                 return Err(SoulseekError::Api {
                     status: 503,
-                    message: format!("Navidrome request failed: {}", e),
+                    message: format!("Navidrome update playlist failed: {}", e),
                 });
             }
         };
