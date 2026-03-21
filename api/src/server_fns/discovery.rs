@@ -229,14 +229,12 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
 
     let backend = download_backend(None).await?;
 
-    // Create per-profile subdirectories under Discovery/ and drop .nsp smart
-    // playlist files so Navidrome auto-maintains playlists from folder contents.
+    // Create per-profile subdirectories under Discovery/
     for profile in &selected_profiles {
         let profile_dir = folder.discovery_profile_path(&profile.to_string());
         tokio::fs::create_dir_all(&profile_dir)
             .await
             .map_err(|e| format!("Failed to create Discovery/{} dir: {}", profile, e))?;
-        write_nsp_if_missing(&profile_dir, &folder.path, &profile.to_string(), &settings.discovery_playlist_name).await?;
     }
 
     // Build the "already seen" set for deduplication
@@ -578,62 +576,147 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
 
     UserSettings::update_discovery_last_generated(user_id).await?;
 
-    // Playlist creation is deferred: files are still downloading at this point.
-    // reconcile_discovery_playlists() runs during automation to match tracks
-    // with Navidrome once they're indexed.
+    // Trigger a Navidrome library scan so the imported files get indexed.
+    // Playlists are created later by reconcile_discovery_playlists() once
+    // Navidrome has scanned the new files.
+    if total_downloads > 0 {
+        if let Ok(navi) = crate::services::navidrome_client_for_user(user_id).await {
+            if let Err(e) = navi.start_scan().await {
+                warn!("Failed to trigger Navidrome scan: {}", e);
+            } else {
+                info!("Triggered Navidrome library scan after {} discovery imports", total_downloads);
+            }
+        }
+    }
 
     Ok(total_downloads)
 }
 
-/// Write a Navidrome .nsp smart playlist file into a Discovery profile folder.
-/// The .nsp makes Navidrome auto-maintain a playlist from the folder contents.
-/// Only writes if the file doesn't already exist (user may have customized it).
+/// Create or update Navidrome playlists for discovery tracks via the Subsonic API.
+///
+/// For each active profile, finds all pending discovery tracks that have a valid
+/// path, searches Navidrome for matching songs, and creates a user-owned playlist.
+/// Requires Navidrome to have already scanned the Discovery/ directories.
 #[cfg(feature = "server")]
-async fn write_nsp_if_missing(
-    profile_dir: &str,
-    folder_path: &str,
-    profile: &str,
-    playlist_names_json: &str,
-) -> Result<(), String> {
-    let nsp_path = format!("{}/playlist.nsp", profile_dir);
-    if std::path::Path::new(&nsp_path).exists() {
+pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> {
+    let settings = UserSettings::get(user_id).await?;
+    if !settings.discovery_enabled {
         return Ok(());
     }
+    let folder_id = match settings.discovery_folder_id.as_ref() {
+        Some(id) => id.clone(),
+        None => return Ok(()),
+    };
 
-    // Build the filepath prefix relative to the Navidrome music library root.
-    // folder_path is absolute (e.g. /music/User1). We need the path relative to
-    // the Navidrome music root. Since we don't know the root, use the last 2
-    // components (e.g. User1/Discovery/Balanced) which will match regardless of
-    // where the root is mounted.
-    let full = format!("{}/Discovery/{}", folder_path, profile);
-    let rel: String = std::path::Path::new(&full)
-        .components()
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join("/");
+    let navi = match crate::services::navidrome_client_for_user(user_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            info!("Playlist reconciliation skipped (no Navidrome client): {}", e);
+            return Ok(());
+        }
+    };
 
-    let playlist_name = UserSettings::get_playlist_name_for_profile(playlist_names_json, profile);
+    // Wait for any ongoing scan to finish (up to 60s)
+    for _ in 0..12 {
+        match navi.get_scan_status().await {
+            Ok(true) => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
+            _ => break,
+        }
+    }
 
-    let nsp_content = serde_json::json!({
-        "name": playlist_name,
-        "comment": format!("Auto-managed by Soulbeet discovery ({})", profile),
-        "all": [
-            { "contains": { "filepath": rel } }
-        ],
-        "sort": "dateAdded",
-        "order": "desc"
-    });
-
-    tokio::fs::write(&nsp_path, serde_json::to_string_pretty(&nsp_content).unwrap_or_default())
+    // Get all Navidrome songs to match against discovery tracks
+    let songs = navi
+        .get_all_songs_with_ratings()
         .await
-        .map_err(|e| format!("Failed to write .nsp file: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
-    info!("Created smart playlist: {} ({})", playlist_name, nsp_path);
+    let selected_profiles = parse_profiles(&settings.discovery_profiles);
+
+    for profile in &selected_profiles {
+        let profile_name = profile.to_string();
+        let tracks =
+            DiscoveryTrackRow::get_pending_by_folder_and_profile(&folder_id, &profile_name)
+                .await?;
+
+        if tracks.is_empty() {
+            continue;
+        }
+
+        // Match discovery tracks to Navidrome songs by filename.
+        // The discovery track path is the actual filesystem path (set after beets import).
+        // Navidrome's path may differ (fake or different mount), so match by filename.
+        let mut song_ids = Vec::new();
+        for track in &tracks {
+            let track_fn = std::path::Path::new(&track.path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_lowercase());
+            let Some(ref tfn) = track_fn else {
+                continue;
+            };
+
+            for song in &songs {
+                if let Some(ref song_path) = song.path {
+                    let song_fn = std::path::Path::new(song_path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_lowercase());
+                    if song_fn.as_deref() == Some(tfn.as_ref()) {
+                        song_ids.push(song.id.clone());
+                        // Also update song_id in our DB for rating sync matching
+                        let _ = DiscoveryTrackRow::update_song_id(&track.id, &song.id).await;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if song_ids.is_empty() {
+            info!(
+                "Playlist reconciliation: no Navidrome matches for {} ({} tracks not yet scanned?)",
+                profile_name,
+                tracks.len()
+            );
+            continue;
+        }
+
+        let playlist_name = UserSettings::get_playlist_name_for_profile(
+            &settings.discovery_playlist_name,
+            &profile_name,
+        );
+
+        // Create new playlist first, then delete old one
+        match navi.create_playlist(&playlist_name, &song_ids).await {
+            Ok(pl) => {
+                // Delete old playlist if it exists
+                if let Some(old_id) = UserSettings::get_playlist_id_for_profile(
+                    &settings.discovery_navidrome_playlist_id,
+                    &profile_name,
+                ) {
+                    let _ = navi.delete_playlist(&old_id).await;
+                }
+                if let Err(e) = UserSettings::update_discovery_playlist_id(
+                    user_id,
+                    &profile_name,
+                    &pl.id,
+                )
+                .await
+                {
+                    warn!("Failed to save playlist ID for '{}': {}", profile_name, e);
+                }
+                info!(
+                    "Created playlist '{}' with {} tracks for user {}",
+                    playlist_name,
+                    song_ids.len(),
+                    user_id
+                );
+            }
+            Err(e) => {
+                warn!("Failed to create playlist '{}': {}", playlist_name, e);
+            }
+        }
+    }
+
     Ok(())
 }
 

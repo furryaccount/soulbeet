@@ -249,6 +249,25 @@ impl NavidromeClient {
         Ok(())
     }
 
+    pub async fn start_scan(&self) -> Result<()> {
+        let _: PingBody = self.get("startScan", &[]).await?;
+        Ok(())
+    }
+
+    pub async fn get_scan_status(&self) -> Result<bool> {
+        #[derive(serde::Deserialize)]
+        struct ScanStatusBody {
+            #[serde(rename = "scanStatus")]
+            scan_status: Option<ScanStatus>,
+        }
+        #[derive(serde::Deserialize)]
+        struct ScanStatus {
+            scanning: bool,
+        }
+        let body: ScanStatusBody = self.get("getScanStatus", &[]).await?;
+        Ok(body.scan_status.map(|s| s.scanning).unwrap_or(false))
+    }
+
     pub async fn get_all_albums(&self) -> Result<Vec<SubsonicAlbum>> {
         let mut all_albums = Vec::new();
         let mut offset = 0u32;
