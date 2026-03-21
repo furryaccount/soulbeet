@@ -43,34 +43,17 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
     let promote_threshold = user_settings.discovery_promote_threshold;
     let auto_delete = user_settings.auto_delete_enabled;
 
-    // Build music root candidates for resolving Navidrome's relative paths.
-    // Try multiple strategies: env var, folder paths, folder parents.
+    // Collect the user's configured folder paths for file resolution.
+    // Auto-delete searches these folders to find files matching Navidrome metadata.
     let folders = crate::models::folder::Folder::get_all_by_user(user_id)
         .await
         .unwrap_or_default();
-    let music_roots: Vec<std::path::PathBuf> = {
-        let mut roots = Vec::new();
-        // 1. NAVIDROME_MUSIC_PATH env var (most reliable if set)
-        if let Ok(p) = std::env::var("NAVIDROME_MUSIC_PATH") {
-            if !p.is_empty() {
-                roots.push(std::path::PathBuf::from(p));
-            }
-        }
-        // 2. Each folder path directly (user folder might BE the music root)
-        for f in &folders {
-            roots.push(std::path::PathBuf::from(&f.path));
-        }
-        // 3. Parents of folder paths (e.g. /music from /music/Person1)
-        for f in &folders {
-            if let Some(parent) = std::path::Path::new(&f.path).parent() {
-                roots.push(parent.to_path_buf());
-            }
-        }
-        roots.dedup();
-        roots
-    };
-    if music_roots.is_empty() {
-        warn!("No music roots found for user {} (no folders configured, no NAVIDROME_MUSIC_PATH)", user_id);
+    let folder_paths: Vec<std::path::PathBuf> = folders
+        .iter()
+        .map(|f| std::path::PathBuf::from(&f.path))
+        .collect();
+    if folder_paths.is_empty() {
+        warn!("No folders configured for user {}, auto-delete will not work", user_id);
     }
 
     let mut deleted_tracks = 0u32;
@@ -98,9 +81,13 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                             song.title
                         );
                         skipped_veto += 1;
-                    } else if let Some(ref path_str) = song.path {
-                        let resolved = resolve_song_path(path_str, &music_roots);
-                        match resolved {
+                    } else {
+                        let artist = song.artist.as_deref().unwrap_or("");
+                        let ext = song.path.as_deref()
+                            .and_then(|p| std::path::Path::new(p).extension())
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("flac");
+                        match find_track_file(&folder_paths, artist, &song.title, ext) {
                             Some(path) => {
                                 if let Err(e) = tokio::fs::remove_file(&path).await {
                                     warn!("Auto-delete failed for {}: {}", path.display(), e);
@@ -111,7 +98,7 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                                     DeletionReviewRow::upsert(
                                         &song.id,
                                         &song.title,
-                                        song.artist.as_deref().unwrap_or("Unknown"),
+                                        artist,
                                         song.album.as_deref().unwrap_or("Unknown"),
                                         Some(&path.to_string_lossy()),
                                         Some(rating),
@@ -123,20 +110,12 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                             }
                             None => {
                                 warn!(
-                                    "Auto-delete skipped (file not found): {} - {} (path: {})",
-                                    song.artist.as_deref().unwrap_or("?"),
-                                    song.title,
-                                    path_str
+                                    "Auto-delete skipped (file not found): {} - {}",
+                                    artist, song.title
                                 );
                                 skipped_not_found += 1;
                             }
                         }
-                    } else {
-                        warn!(
-                            "Auto-delete skipped (no path from Navidrome): {} - {}",
-                            song.artist.as_deref().unwrap_or("?"),
-                            song.title
-                        );
                     }
                 }
             }
@@ -229,101 +208,67 @@ pub async fn get_deletion_history() -> Result<Vec<DeletionReview>, ServerFnError
         .map_err(server_error)
 }
 
-/// Resolve a song path from Navidrome to an absolute path on disk.
+/// Find a track file on disk by searching the user's configured folders.
 ///
-/// Navidrome returns paths relative to its music library root, which may not
-/// exactly match the filesystem (different naming conventions, character
-/// substitutions, stale paths). We try exact resolution first, then fall back
-/// to searching by artist directory + fuzzy filename matching.
+/// Navidrome's path field is unreliable for filesystem operations (different
+/// mounts, naming conventions, character substitutions). Instead we search
+/// by metadata: find the artist directory, then find a file whose name
+/// contains the track title with the right extension.
 #[cfg(feature = "server")]
-fn resolve_song_path(
-    path_str: &str,
-    music_roots: &[std::path::PathBuf],
+fn find_track_file(
+    folder_paths: &[std::path::PathBuf],
+    artist: &str,
+    title: &str,
+    extension: &str,
 ) -> Option<std::path::PathBuf> {
-    let path = std::path::Path::new(path_str);
-
-    // Try as-is (handles absolute paths)
-    if path.is_absolute() && path.exists() {
-        return Some(path.to_path_buf());
-    }
-
-    // Try exact resolution against each music root
-    for root in music_roots {
-        let resolved = root.join(path_str);
-        if resolved.exists() {
-            return Some(resolved);
-        }
-    }
-
-    // Fuzzy fallback: find by artist directory + filename stem.
-    // Navidrome paths look like "Artist/Album/01-12 - Title.flac".
-    // The actual file might be named differently (e.g. "12 Title.flac")
-    // or in a slightly different folder (e.g. "Album!" vs "Album?").
-    let components: Vec<_> = path.components().collect();
-    if components.is_empty() {
+    if artist.is_empty() || title.is_empty() {
         return None;
     }
 
-    // Extract the artist directory (first component) and search within it
-    let artist_dir = components[0].as_os_str().to_string_lossy();
-    let file_stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let extension = path
-        .extension()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    let artist_lower = artist.to_lowercase();
+    let title_lower = title.to_lowercase();
+    let ext_lower = extension.to_lowercase();
 
-    // Extract a clean title from the filename by stripping track numbers.
-    // "01-12 - Do You Feel" -> "do you feel"
-    // "12 Do You Feel" -> "do you feel"
-    let clean_title = strip_track_prefix(&file_stem);
-
-    for root in music_roots {
-        let artist_path = root.join(artist_dir.as_ref());
-        if !artist_path.is_dir() {
-            continue;
-        }
-        // Search recursively within the artist directory
-        if let Some(found) = find_file_by_title(&artist_path, &clean_title, &extension) {
-            return Some(found);
+    for folder in folder_paths {
+        // Scan top-level directories in the folder to find the artist
+        let entries = match std::fs::read_dir(folder) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if dir_name != artist_lower {
+                continue;
+            }
+            // Found artist directory. Search it recursively for the track.
+            if let Some(found) = search_for_title(&path, &title_lower, &ext_lower) {
+                return Some(found);
+            }
         }
     }
 
     None
 }
 
-/// Strip track number prefixes from a filename stem.
-/// "01-12 - do you feel" -> "do you feel"
-/// "12 do you feel" -> "do you feel"
-/// "01 - do you feel" -> "do you feel"
+/// Recursively search a directory for a music file whose stem contains the title.
 #[cfg(feature = "server")]
-fn strip_track_prefix(stem: &str) -> String {
-    // Try "01-12 - Title" or "01 - Title" pattern
-    if let Some(idx) = stem.find(" - ") {
-        return stem[idx + 3..].trim().to_string();
-    }
-    // Try "12 Title" pattern (digits followed by space)
-    let trimmed = stem.trim_start_matches(|c: char| c.is_ascii_digit());
-    if trimmed.len() < stem.len() {
-        return trimmed.trim_start().to_string();
-    }
-    stem.to_string()
-}
-
-/// Recursively search for a file matching a title within a directory.
-#[cfg(feature = "server")]
-fn find_file_by_title(
+fn search_for_title(
     dir: &std::path::Path,
-    clean_title: &str,
-    extension: &str,
+    title_lower: &str,
+    ext_lower: &str,
 ) -> Option<std::path::PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(found) = find_file_by_title(&path, clean_title, extension) {
+            if let Some(found) = search_for_title(&path, title_lower, ext_lower) {
                 return Some(found);
             }
         } else if path.is_file() {
@@ -331,15 +276,15 @@ fn find_file_by_title(
                 .extension()
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
-            if ext != extension {
+            if ext != ext_lower {
                 continue;
             }
             let stem = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
-            let candidate_title = strip_track_prefix(&stem);
-            if candidate_title == clean_title {
+            // Match if the filename contains the title (handles any track number format)
+            if stem.contains(title_lower) {
                 return Some(path);
             }
         }
