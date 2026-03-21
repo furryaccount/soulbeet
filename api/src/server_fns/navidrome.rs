@@ -43,9 +43,31 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
     let promote_threshold = user_settings.discovery_promote_threshold;
     let auto_delete = user_settings.auto_delete_enabled;
 
+    // Build music root candidates from the user's folder paths.
+    // Navidrome returns paths relative to its music library root.
+    // User folders are absolute (e.g. /music/Person1), so their parents
+    // (e.g. /music) are candidate roots for resolving song paths.
+    let folders = crate::models::folder::Folder::get_all_by_user(user_id)
+        .await
+        .unwrap_or_default();
+    let music_roots: Vec<std::path::PathBuf> = {
+        let mut roots: Vec<std::path::PathBuf> = folders
+            .iter()
+            .filter_map(|f| {
+                std::path::Path::new(&f.path)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+            })
+            .collect();
+        roots.dedup();
+        roots
+    };
+
     let mut deleted_tracks = 0u32;
     let mut promoted_tracks = 0u32;
     let mut removed_tracks = 0u32;
+    let mut skipped_veto = 0u32;
+    let mut skipped_not_found = 0u32;
 
     let pending_discovery_tracks = DiscoveryTrackRow::get_all_pending().await?;
 
@@ -54,17 +76,23 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
         if auto_delete {
             if let Some(rating) = song.user_rating {
                 if rating == 1 {
-                    // For shared folders: skip deletion if the average rating
-                    // across all Navidrome users is above 1 (someone else likes it)
                     let shared_veto = song
                         .average_rating
                         .map(|avg| avg > 1.0)
                         .unwrap_or(false);
-                    if !shared_veto {
-                        if let Some(ref path_str) = song.path {
-                            let path = std::path::Path::new(path_str);
-                            if path.exists() {
-                                if let Err(e) = tokio::fs::remove_file(path).await {
+                    if shared_veto {
+                        info!(
+                            "Auto-delete skipped (shared veto, avg={:.1}): {} - {}",
+                            song.average_rating.unwrap_or(0.0),
+                            song.artist.as_deref().unwrap_or("?"),
+                            song.title
+                        );
+                        skipped_veto += 1;
+                    } else if let Some(ref path_str) = song.path {
+                        let resolved = resolve_song_path(path_str, &music_roots);
+                        match resolved {
+                            Some(path) => {
+                                if let Err(e) = tokio::fs::remove_file(&path).await {
                                     warn!("Auto-delete failed for {}: {}", path.display(), e);
                                 } else {
                                     if let Some(parent) = path.parent() {
@@ -75,7 +103,7 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                                         &song.title,
                                         song.artist.as_deref().unwrap_or("Unknown"),
                                         song.album.as_deref().unwrap_or("Unknown"),
-                                        song.path.as_deref(),
+                                        Some(&path.to_string_lossy()),
                                         Some(rating),
                                         user_id,
                                     )
@@ -83,7 +111,22 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                                     deleted_tracks += 1;
                                 }
                             }
+                            None => {
+                                warn!(
+                                    "Auto-delete skipped (file not found): {} - {} (path: {})",
+                                    song.artist.as_deref().unwrap_or("?"),
+                                    song.title,
+                                    path_str
+                                );
+                                skipped_not_found += 1;
+                            }
                         }
+                    } else {
+                        warn!(
+                            "Auto-delete skipped (no path from Navidrome): {} - {}",
+                            song.artist.as_deref().unwrap_or("?"),
+                            song.title
+                        );
                     }
                 }
             }
@@ -137,6 +180,14 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
         }
     }
 
+    if !auto_delete {
+        info!("Auto-delete is disabled for this user");
+    } else if skipped_veto > 0 || skipped_not_found > 0 {
+        info!(
+            "Auto-delete: {} skipped (shared veto), {} skipped (file not found)",
+            skipped_veto, skipped_not_found
+        );
+    }
     info!(
         "Ratings sync complete: {} songs scanned, {} deleted, {} promoted, {} removed",
         total_songs_scanned, deleted_tracks, promoted_tracks, removed_tracks
@@ -155,6 +206,34 @@ pub async fn get_deletion_history() -> Result<Vec<DeletionReview>, ServerFnError
     DeletionReviewRow::get_history(&auth.0.sub, 50)
         .await
         .map_err(server_error)
+}
+
+/// Resolve a song path from Navidrome to an absolute path on disk.
+///
+/// Navidrome may return absolute or relative paths depending on version.
+/// We try the path as-is first, then resolve against each music root
+/// derived from the user's folder paths.
+#[cfg(feature = "server")]
+fn resolve_song_path(
+    path_str: &str,
+    music_roots: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(path_str);
+
+    // Try as-is (handles absolute paths)
+    if path.is_absolute() && path.exists() {
+        return Some(path.to_path_buf());
+    }
+
+    // Try resolving against each music root
+    for root in music_roots {
+        let resolved = root.join(path_str);
+        if resolved.exists() {
+            return Some(resolved);
+        }
+    }
+
+    None
 }
 
 #[cfg(feature = "server")]
