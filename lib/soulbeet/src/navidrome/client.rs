@@ -351,71 +351,15 @@ impl NavidromeClient {
         name: &str,
         song_ids: &[String],
     ) -> Result<SubsonicPlaylistDetail> {
-        if self.circuit_breaker.is_open().await {
-            return Err(SoulseekError::Api {
-                status: 503,
-                message: "Circuit breaker open".to_string(),
-            });
+        let mut params: Vec<(&str, &str)> = vec![("name", name)];
+        for id in song_ids {
+            params.push(("songId", id));
         }
-
-        let mut url =
-            self.base_url
-                .join("rest/createPlaylist")
-                .map_err(|e| SoulseekError::Api {
-                    status: 0,
-                    message: format!("URL error: {}", e),
-                })?;
-
-        {
-            let mut query = url.query_pairs_mut();
-            for (k, v) in self.auth_params() {
-                query.append_pair(k, &v);
-            }
-            query.append_pair("name", name);
-            for id in song_ids {
-                query.append_pair("songId", id);
-            }
-        }
-
-        let response = match self.client.get(url).send().await {
-            Ok(resp) => {
-                self.circuit_breaker.record_success().await;
-                resp
-            }
-            Err(e) => {
-                self.circuit_breaker.record_failure().await;
-                return Err(SoulseekError::Api {
-                    status: 503,
-                    message: format!("Navidrome create playlist failed: {}", e),
-                });
-            }
-        };
-
-        let envelope: SubsonicEnvelope<PlaylistBody> =
-            response.json().await.map_err(|e| SoulseekError::Api {
-                status: 500,
-                message: format!("Failed to parse response: {}", e),
-            })?;
-
-        if envelope.response.status != "ok" {
-            let err = envelope.response.error.unwrap_or(SubsonicError {
-                code: 0,
-                message: "Unknown error".to_string(),
-            });
-            return Err(SoulseekError::Api {
-                status: err.code as u16,
-                message: err.message,
-            });
-        }
-
-        envelope
-            .response
-            .body
-            .playlist
-            .ok_or_else(|| SoulseekError::Api {
-                status: 500,
-                message: "No playlist returned after creation".to_string(),
-            })
+        let body: PlaylistBody = self.get("createPlaylist", &params).await?;
+        body.playlist.ok_or_else(|| SoulseekError::Api {
+            status: 500,
+            message: "No playlist returned after creation".to_string(),
+        })
     }
 
     pub async fn delete_playlist(&self, id: &str) -> Result<()> {
@@ -428,63 +372,11 @@ impl NavidromeClient {
         playlist_id: &str,
         song_ids_to_add: &[String],
     ) -> Result<()> {
-        if self.circuit_breaker.is_open().await {
-            return Err(SoulseekError::Api {
-                status: 503,
-                message: "Circuit breaker open".to_string(),
-            });
+        let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
+        for id in song_ids_to_add {
+            params.push(("songIdToAdd", id));
         }
-
-        let mut url =
-            self.base_url
-                .join("rest/updatePlaylist")
-                .map_err(|e| SoulseekError::Api {
-                    status: 0,
-                    message: format!("URL error: {}", e),
-                })?;
-
-        {
-            let mut query = url.query_pairs_mut();
-            for (k, v) in self.auth_params() {
-                query.append_pair(k, &v);
-            }
-            query.append_pair("playlistId", playlist_id);
-            for id in song_ids_to_add {
-                query.append_pair("songIdToAdd", id);
-            }
-        }
-
-        let response = match self.client.get(url).send().await {
-            Ok(resp) => {
-                self.circuit_breaker.record_success().await;
-                resp
-            }
-            Err(e) => {
-                self.circuit_breaker.record_failure().await;
-                return Err(SoulseekError::Api {
-                    status: 503,
-                    message: format!("Navidrome update playlist failed: {}", e),
-                });
-            }
-        };
-
-        let envelope: SubsonicEnvelope<PingBody> =
-            response.json().await.map_err(|e| SoulseekError::Api {
-                status: 500,
-                message: format!("Failed to parse response: {}", e),
-            })?;
-
-        if envelope.response.status != "ok" {
-            let err = envelope.response.error.unwrap_or(SubsonicError {
-                code: 0,
-                message: "Unknown error".to_string(),
-            });
-            return Err(SoulseekError::Api {
-                status: err.code as u16,
-                message: err.message,
-            });
-        }
-
+        let _: PingBody = self.get("updatePlaylist", &params).await?;
         Ok(())
     }
 
