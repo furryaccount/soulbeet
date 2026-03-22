@@ -329,6 +329,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<share
                         warn!("Search failed for '{}' - {}: {}", candidate.artist, candidate.track, e);
                         stats.search_errors += 1;
                         seen.insert(key.clone());
+                        DiscoveryCandidateRow::mark_used(user_id, &profile_name, &candidate.artist, &candidate.track).await?;
                         continue;
                     }
                 };
@@ -365,6 +366,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<share
                     info!("No results for '{}' - {}, skipping", candidate.artist, candidate.track);
                     stats.search_misses += 1;
                     seen.insert(key.clone());
+                    DiscoveryCandidateRow::mark_used(user_id, &profile_name, &candidate.artist, &candidate.track).await?;
                     continue;
                 }
                 stats.search_hits += 1;
@@ -420,6 +422,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<share
                 }
                 if !downloaded {
                     seen.insert(key.clone());
+                    DiscoveryCandidateRow::mark_used(user_id, &profile_name, &candidate.artist, &candidate.track).await?;
                 }
             }
 
