@@ -88,11 +88,37 @@ pub struct DiscoveryConfig {
     pub enabled: bool,
     pub folder_id: Option<String>,
     pub folder_name: Option<String>,
-    pub track_count: u32,
-    pub lifetime_days: u32,
+    pub track_counts: std::collections::HashMap<String, u32>,
+    pub lifetime_days: std::collections::HashMap<String, u32>,
     pub profiles: String,
     pub playlist_names: std::collections::HashMap<String, String>,
     pub last_generated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GenerationResult {
+    pub total_imported: u32,
+    pub profiles: Vec<ProfileGenerationStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileGenerationStats {
+    pub profile: String,
+    pub target: u32,
+    pub attempts: u32,
+    pub candidates_tried: u32,
+    pub candidates_skipped_seen: u32,
+    pub search_hits: u32,
+    pub search_misses: u32,
+    pub search_errors: u32,
+    pub downloads_queued: u32,
+    pub downloads_completed: u32,
+    pub downloads_failed: u32,
+    pub downloads_timed_out: u32,
+    pub imports_succeeded: u32,
+    pub imports_skipped: u32,
+    pub imports_failed: u32,
+    pub imports_file_missing: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

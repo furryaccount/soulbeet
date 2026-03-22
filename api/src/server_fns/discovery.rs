@@ -43,8 +43,8 @@ pub async fn get_discovery_config() -> Result<DiscoveryConfig, ServerFnError> {
         enabled: settings.discovery_enabled,
         folder_id: settings.discovery_folder_id,
         folder_name,
-        track_count: settings.discovery_track_count as u32,
-        lifetime_days: settings.discovery_lifetime_days as u32,
+        track_counts: settings.parse_track_counts(),
+        lifetime_days: settings.parse_lifetime_days(),
         profiles: settings.discovery_profiles,
         playlist_names: serde_json::from_str(&settings.discovery_playlist_name).unwrap_or_default(),
         last_generated_at: settings.discovery_last_generated_at,
@@ -151,18 +151,19 @@ pub async fn remove_discovery_track(req: TrackActionRequest) -> Result<(), Serve
 }
 
 #[post("/api/discovery/generate", auth: AuthSession)]
-pub async fn generate_discovery_playlist() -> Result<u32, ServerFnError> {
+pub async fn generate_discovery_playlist() -> Result<shared::navidrome::GenerationResult, ServerFnError> {
     generate_discovery_playlist_internal(&auth.0.sub)
         .await
         .map_err(server_error)
 }
 
 #[cfg(feature = "server")]
-pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, String> {
+pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<shared::navidrome::GenerationResult, String> {
     use crate::models::deletion_review::DeletionReviewRow;
     use crate::models::discovery_candidate::DiscoveryCandidateRow;
     use crate::models::discovery_history::DiscoveryHistoryRow;
     use crate::services::download_backend;
+    use shared::navidrome::{GenerationResult, ProfileGenerationStats};
 
     // Acquire per-user lock to prevent concurrent generation
     let user_lock = {
@@ -189,8 +190,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
         .ok_or("Discovery folder not found")?;
 
     let selected_profiles = parse_profiles(&settings.discovery_profiles);
-    let tracks_per_profile =
-        ((settings.discovery_track_count as usize) / selected_profiles.len().max(1)).max(1);
+    let track_counts = settings.parse_track_counts();
 
     let backend = download_backend(None).await?;
 
@@ -226,15 +226,23 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
     info!("Added {} deleted tracks to exclusion set", deletion_count);
 
     let mut total_downloads = 0u32;
+    let mut all_profile_stats: Vec<ProfileGenerationStats> = Vec::new();
 
     for profile in &selected_profiles {
         let profile_name = profile.to_string();
+        let tracks_per_profile = track_counts.get(&profile_name).copied().unwrap_or(10) as usize;
         let mut profile_downloads = 0u32;
+        let mut stats = ProfileGenerationStats {
+            profile: profile_name.clone(),
+            target: tracks_per_profile as u32,
+            ..Default::default()
+        };
 
         // Retry loop: keep pulling new candidates until target is met or pool is dry.
         // Each attempt searches Soulseek, downloads, and imports. Tracks that fail
         // at any stage are added to `seen` so the next attempt skips them.
         for _attempt in 0..3u32 {
+            stats.attempts += 1;
             let remaining = tracks_per_profile.saturating_sub(profile_downloads as usize);
             if remaining == 0 {
                 break;
@@ -295,8 +303,10 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                     candidate.track.to_lowercase()
                 );
                 if seen.contains(&key) {
+                    stats.candidates_skipped_seen += 1;
                     continue;
                 }
+                stats.candidates_tried += 1;
 
                 let search_tracks = vec![shared::metadata::Track {
                     id: String::new(),
@@ -314,6 +324,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                     Ok(id) => id,
                     Err(e) => {
                         warn!("Search failed for '{}' - {}: {}", candidate.artist, candidate.track, e);
+                        stats.search_errors += 1;
                         seen.insert(key.clone());
                         continue;
                     }
@@ -347,6 +358,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                     Some(item) => item,
                     None => {
                         info!("No results for '{}' - {}, skipping", candidate.artist, candidate.track);
+                        stats.search_misses += 1;
                         seen.insert(key.clone());
                         continue;
                     }
@@ -355,13 +367,16 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                     Ok(r) => r,
                     Err(e) => {
                         warn!("Download failed for '{}' - {}: {}", candidate.artist, candidate.track, e);
+                        stats.downloads_failed += 1;
                         seen.insert(key.clone());
                         continue;
                     }
                 };
 
+                stats.search_hits += 1;
                 for dl in &download_results {
                     if dl.error.is_none() {
+                        stats.downloads_queued += 1;
                         seen.insert(key.clone());
                         queued.push(QueuedTrack {
                             artist: candidate.artist.clone(),
@@ -437,6 +452,8 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                 }
             }
 
+            stats.downloads_timed_out += remaining_filenames.len() as u32;
+            stats.downloads_completed += (stats.downloads_queued - stats.downloads_timed_out - stats.downloads_failed).max(0);
             if !remaining_filenames.is_empty() {
                 warn!(
                     "{}: {} downloads didn't complete within timeout",
@@ -470,6 +487,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                             "Could not find downloaded file for '{}' - {} (slskd: {})",
                             qt.artist, qt.track, qt.slskd_filename
                         );
+                        stats.imports_file_missing += 1;
                         continue;
                     }
                 };
@@ -485,16 +503,19 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                         }
                         Ok(soulbeet::ImportResult::Skipped) => {
                             warn!("Beets skipped '{}' - {} (duplicate?)", qt.artist, qt.track);
+                            stats.imports_skipped += 1;
                             let _ = tokio::fs::remove_file(src).await;
                             continue;
                         }
                         Ok(other) => {
                             warn!("Beets import issue for '{}' - {}: {:?}", qt.artist, qt.track, other);
+                            stats.imports_failed += 1;
                             let _ = tokio::fs::remove_file(src).await;
                             continue;
                         }
                         Err(e) => {
                             warn!("Beets import failed for '{}' - {}: {}", qt.artist, qt.track, e);
+                            stats.imports_failed += 1;
                             let _ = tokio::fs::remove_file(src).await;
                             continue;
                         }
@@ -533,6 +554,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                             "Could not find imported file for '{}' - {} in {}",
                             qt.artist, qt.track, profile_path
                         );
+                        stats.imports_file_missing += 1;
                         continue;
                     }
                 };
@@ -547,6 +569,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
                     &profile_name,
                 )
                 .await?;
+                stats.imports_succeeded += 1;
                 profile_downloads += 1;
             }
 
@@ -565,6 +588,7 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
         );
 
         total_downloads += profile_downloads;
+        all_profile_stats.push(stats);
     }
 
     UserSettings::update_discovery_last_generated(user_id).await?;
@@ -582,7 +606,10 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<u32, 
         }
     }
 
-    Ok(total_downloads)
+    Ok(GenerationResult {
+        total_imported: total_downloads,
+        profiles: all_profile_stats,
+    })
 }
 
 /// Create or update smart playlists in Navidrome for each discovery profile.

@@ -24,15 +24,28 @@ pub fn DiscoveryOverview() -> Element {
 
     let mut generating = use_signal(|| false);
     let mut error = use_signal(String::new);
-    let mut success = use_signal(String::new);
+    let mut success_lines: Signal<Vec<String>> = use_signal(Vec::new);
 
     let handle_generate = move |_| async move {
         generating.set(true);
         error.set(String::new());
-        success.set(String::new());
+        success_lines.set(vec![]);
         match api::generate_discovery_playlist().await {
-            Ok(count) => {
-                success.set(format!("{count} tracks downloaded"));
+            Ok(result) => {
+                let mut lines = vec![format!("{} tracks imported", result.total_imported)];
+                for ps in &result.profiles {
+                    lines.push(format!(
+                        "  {} {}/{} (searched {}, found {}, queued {}, imported {})",
+                        ps.profile,
+                        ps.imports_succeeded,
+                        ps.target,
+                        ps.candidates_tried,
+                        ps.search_hits,
+                        ps.downloads_queued,
+                        ps.imports_succeeded,
+                    ));
+                }
+                success_lines.set(lines);
                 config.restart();
             }
             Err(e) => error.set(format!("{e}")),
@@ -72,13 +85,17 @@ pub fn DiscoveryOverview() -> Element {
                                         if let Some(ref name) = cfg.folder_name {
                                             p { class: "text-white font-medium", "Folder: {name}" }
                                         }
-                                        p { class: "text-gray-400 text-xs font-mono",
-                                            "Target: {cfg.track_count} tracks / {cfg.lifetime_days}d lifetime"
-                                        }
                                         div { class: "mt-1 space-y-0.5",
-                                            for (_profile, name) in &cfg.playlist_names {
-                                                p { class: "text-gray-400 text-xs font-mono",
-                                                    span { class: "text-green-400", "{name}" }
+                                            for (profile, name) in &cfg.playlist_names {
+                                                {
+                                                    let tc = cfg.track_counts.get(profile).copied().unwrap_or(10);
+                                                    let lt = cfg.lifetime_days.get(profile).copied().unwrap_or(7);
+                                                    rsx! {
+                                                        p { class: "text-gray-400 text-xs font-mono",
+                                                            span { class: "text-green-400", "{name}" }
+                                                            span { class: "text-gray-600 ml-1", "({tc} tracks / {lt}d)" }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -98,8 +115,8 @@ pub fn DiscoveryOverview() -> Element {
                                         if !error().is_empty() {
                                             span { class: "text-xs font-mono text-red-400", "{error}" }
                                         }
-                                        if !success().is_empty() {
-                                            span { class: "text-xs font-mono text-green-400", "{success}" }
+                                        for line in success_lines().iter() {
+                                            span { class: "text-xs font-mono text-green-400 block text-right", "{line}" }
                                         }
                                     }
                                 }

@@ -17,8 +17,8 @@ pub struct UserSettings {
     pub listenbrainz_token: Option<String>,
     pub discovery_enabled: bool,
     pub discovery_folder_id: Option<String>,
-    pub discovery_track_count: i32,
-    pub discovery_lifetime_days: i32,
+    pub discovery_track_count: String,
+    pub discovery_lifetime_days: String,
     pub discovery_profiles: String,
     pub discovery_playlist_name: String,
     pub discovery_navidrome_playlist_id: Option<String>,
@@ -50,9 +50,9 @@ pub struct UpdateUserSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_folder_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery_track_count: Option<i32>,
+    pub discovery_track_count: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery_lifetime_days: Option<i32>,
+    pub discovery_lifetime_days: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_profiles: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,8 +83,8 @@ impl UserSettings {
             listenbrainz_token: None,
             discovery_enabled: false,
             discovery_folder_id: None,
-            discovery_track_count: 20,
-            discovery_lifetime_days: 7,
+            discovery_track_count: r#"{"Conservative":10,"Balanced":10,"Adventurous":10}"#.to_string(),
+            discovery_lifetime_days: r#"{"Conservative":7,"Balanced":7,"Adventurous":7}"#.to_string(),
             discovery_profiles: "Conservative,Balanced,Adventurous".to_string(),
             discovery_playlist_name: r#"{"Conservative":"Comfort Zone","Balanced":"Fresh Picks","Adventurous":"Deep Cuts"}"#.to_string(),
             discovery_navidrome_playlist_id: None,
@@ -251,13 +251,51 @@ impl UserSettings {
         Ok(())
     }
 
+    /// Parse per-profile track counts from the JSON column, with fallback for legacy integer values.
+    pub fn parse_track_counts(&self) -> std::collections::HashMap<String, u32> {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, u32>>(&self.discovery_track_count) {
+            return map;
+        }
+        // Legacy fallback: plain integer -> split evenly across profiles
+        let total: u32 = self.discovery_track_count.parse().unwrap_or(30);
+        let per = total / 3;
+        [
+            ("Conservative".to_string(), per),
+            ("Balanced".to_string(), per),
+            ("Adventurous".to_string(), total - per * 2),
+        ].into_iter().collect()
+    }
+
+    /// Parse per-profile lifetime days from the JSON column, with fallback for legacy integer values.
+    pub fn parse_lifetime_days(&self) -> std::collections::HashMap<String, u32> {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, u32>>(&self.discovery_lifetime_days) {
+            return map;
+        }
+        // Legacy fallback: plain integer -> same value for all profiles
+        let days: u32 = self.discovery_lifetime_days.parse().unwrap_or(7);
+        [
+            ("Conservative".to_string(), days),
+            ("Balanced".to_string(), days),
+            ("Adventurous".to_string(), days),
+        ].into_iter().collect()
+    }
+
+    /// Get track count for a specific profile.
+    pub fn track_count_for_profile(&self, profile: &str) -> usize {
+        self.parse_track_counts().get(profile).copied().unwrap_or(10) as usize
+    }
+
     /// Get users with expired discovery playlists that need regeneration
     pub async fn get_expired_discoveries() -> Result<Vec<UserSettings>, String> {
         let rows = sqlx::query_as::<_, UserSettings>(
             "SELECT * FROM user_settings
              WHERE discovery_enabled = 1
                AND (discovery_last_generated_at IS NULL
-                    OR datetime(discovery_last_generated_at, '+' || discovery_lifetime_days || ' days') < datetime('now'))"
+                    OR datetime(discovery_last_generated_at, '+' || min(
+                        COALESCE(json_extract(discovery_lifetime_days, '$.Conservative'), 7),
+                        COALESCE(json_extract(discovery_lifetime_days, '$.Balanced'), 7),
+                        COALESCE(json_extract(discovery_lifetime_days, '$.Adventurous'), 7)
+                    ) || ' days') < datetime('now'))"
         )
         .fetch_all(&*DB)
         .await

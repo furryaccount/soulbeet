@@ -29,12 +29,17 @@ pub fn FolderManager() -> Element {
     // Discovery settings state
     let mut discovery_enabled = use_signal(|| false);
     let mut discovery_folder_id = use_signal(String::new);
-    let mut discovery_track_count = use_signal(|| "20".to_string());
-    let mut discovery_lifetime_days = use_signal(|| "7".to_string());
     let mut discovery_profiles = use_signal(|| "Conservative,Balanced,Adventurous".to_string());
     let mut pl_name_safe = use_signal(|| "Comfort Zone".to_string());
     let mut pl_name_mix = use_signal(|| "Fresh Picks".to_string());
     let mut pl_name_wild = use_signal(|| "Deep Cuts".to_string());
+    // Per-profile track counts and lifetimes
+    let mut tc_safe = use_signal(|| "10".to_string());
+    let mut tc_mix = use_signal(|| "10".to_string());
+    let mut tc_wild = use_signal(|| "10".to_string());
+    let mut lt_safe = use_signal(|| "7".to_string());
+    let mut lt_mix = use_signal(|| "7".to_string());
+    let mut lt_wild = use_signal(|| "7".to_string());
 
     use_future(move || async move {
         if let Ok(user_settings) = api::get_user_settings().await {
@@ -46,22 +51,30 @@ pub fn FolderManager() -> Element {
             lb_token.set(user_settings.listenbrainz_token.unwrap_or_default());
             discovery_enabled.set(user_settings.discovery_enabled);
             discovery_folder_id.set(user_settings.discovery_folder_id.unwrap_or_default());
-            discovery_track_count.set(user_settings.discovery_track_count.to_string());
-            discovery_lifetime_days.set(user_settings.discovery_lifetime_days.to_string());
             discovery_profiles.set(user_settings.discovery_profiles);
             // Parse per-profile playlist names from JSON
             if let Ok(names) = serde_json::from_str::<std::collections::HashMap<String, String>>(
                 &user_settings.discovery_playlist_name,
             ) {
-                if let Some(n) = names.get("Conservative") {
-                    pl_name_safe.set(n.clone());
-                }
-                if let Some(n) = names.get("Balanced") {
-                    pl_name_mix.set(n.clone());
-                }
-                if let Some(n) = names.get("Adventurous") {
-                    pl_name_wild.set(n.clone());
-                }
+                if let Some(n) = names.get("Conservative") { pl_name_safe.set(n.clone()); }
+                if let Some(n) = names.get("Balanced") { pl_name_mix.set(n.clone()); }
+                if let Some(n) = names.get("Adventurous") { pl_name_wild.set(n.clone()); }
+            }
+            // Parse per-profile track counts
+            if let Ok(counts) = serde_json::from_str::<std::collections::HashMap<String, u32>>(
+                &user_settings.discovery_track_count,
+            ) {
+                if let Some(n) = counts.get("Conservative") { tc_safe.set(n.to_string()); }
+                if let Some(n) = counts.get("Balanced") { tc_mix.set(n.to_string()); }
+                if let Some(n) = counts.get("Adventurous") { tc_wild.set(n.to_string()); }
+            }
+            // Parse per-profile lifetime days
+            if let Ok(days) = serde_json::from_str::<std::collections::HashMap<String, u32>>(
+                &user_settings.discovery_lifetime_days,
+            ) {
+                if let Some(n) = days.get("Conservative") { lt_safe.set(n.to_string()); }
+                if let Some(n) = days.get("Balanced") { lt_mix.set(n.to_string()); }
+                if let Some(n) = days.get("Adventurous") { lt_wild.set(n.to_string()); }
             }
             settings_loaded.set(true);
         }
@@ -326,115 +339,132 @@ pub fn FolderManager() -> Element {
                                     }
                                 }
 
-                                // Track count and lifetime
-                                div { class: "flex gap-3",
-                                    div { class: "flex-1 p-3 bg-beet-dark rounded border border-white/10",
-                                        label { class: "block text-xs font-mono text-gray-400 mb-1 uppercase tracking-wider", "Track Count" }
-                                        input {
-                                            class: "w-full p-2 rounded bg-beet-panel border border-white/10 text-white font-mono text-sm text-center",
-                                            "type": "number",
-                                            min: "5",
-                                            max: "50",
-                                            value: "{discovery_track_count}",
-                                            oninput: move |e| discovery_track_count.set(e.value()),
-                                            onchange: move |_| async move {
-                                                let val: i32 = discovery_track_count().parse().unwrap_or(20);
-                                                let update = api::UpdateUserSettings {
-                                                    discovery_track_count: Some(val),
-                                                    ..Default::default()
-                                                };
-                                                let _ = api::update_user_settings(update).await;
-                                            },
-                                        }
-                                    }
-                                    div { class: "flex-1 p-3 bg-beet-dark rounded border border-white/10",
-                                        label { class: "block text-xs font-mono text-gray-400 mb-1 uppercase tracking-wider", "Lifetime (days)" }
-                                        input {
-                                            class: "w-full p-2 rounded bg-beet-panel border border-white/10 text-white font-mono text-sm text-center",
-                                            "type": "number",
-                                            min: "1",
-                                            max: "90",
-                                            value: "{discovery_lifetime_days}",
-                                            oninput: move |e| discovery_lifetime_days.set(e.value()),
-                                            onchange: move |_| async move {
-                                                let val: i32 = discovery_lifetime_days().parse().unwrap_or(7);
-                                                let update = api::UpdateUserSettings {
-                                                    discovery_lifetime_days: Some(val),
-                                                    ..Default::default()
-                                                };
-                                                let _ = api::update_user_settings(update).await;
-                                            },
-                                        }
-                                    }
-                                }
-
-                                // Playlists: toggle + name in one row per profile
+                                // Playlists: toggle + name + track count + lifetime per profile
                                 div { class: "p-3 bg-beet-dark rounded border border-white/10",
                                     label { class: "block text-xs font-mono text-gray-400 mb-2 uppercase tracking-wider", "Playlists" }
                                     div { class: "space-y-2",
-                                        for (label, value, color, signal) in [
-                                            ("Safe", "Conservative", "border-blue-500/40 bg-blue-600/10", &pl_name_safe),
-                                            ("Mix", "Balanced", "border-green-500/40 bg-green-600/10", &pl_name_mix),
-                                            ("Wild", "Adventurous", "border-purple-500/40 bg-purple-600/10", &pl_name_wild),
+                                        for (label, value, color, name_signal, tc_signal, lt_signal) in [
+                                            ("Safe", "Conservative", "border-blue-500/40 bg-blue-600/10", &pl_name_safe, &tc_safe, &lt_safe),
+                                            ("Mix", "Balanced", "border-green-500/40 bg-green-600/10", &pl_name_mix, &tc_mix, &lt_mix),
+                                            ("Wild", "Adventurous", "border-purple-500/40 bg-purple-600/10", &pl_name_wild, &tc_wild, &lt_wild),
                                         ] {
                                             {
                                                 let active = discovery_profiles().split(',').any(|p| p.trim() == value);
                                                 rsx! {
                                                     div {
                                                         class: format!(
-                                                            "flex items-center gap-2 p-2 rounded border transition-colors {}",
+                                                            "p-2 rounded border transition-colors {}",
                                                             if active { color } else { "border-white/5 bg-white/[0.02] opacity-50" }
                                                         ),
-                                                        // Toggle button
-                                                        button {
-                                                            class: format!(
-                                                                "shrink-0 w-16 py-0.5 text-xs font-mono rounded cursor-pointer transition-colors text-center {}",
-                                                                if active { "bg-white/15 text-white" } else { "bg-white/5 text-gray-500" }
-                                                            ),
-                                                            onclick: move |_| async move {
-                                                                let current: Vec<String> = discovery_profiles().split(',')
-                                                                    .map(|s| s.trim().to_string())
-                                                                    .filter(|s| !s.is_empty())
-                                                                    .collect();
-                                                                let new_profiles = if current.iter().any(|p| p == value) {
-                                                                    let filtered: Vec<_> = current.into_iter().filter(|p| p != value).collect();
-                                                                    if filtered.is_empty() { value.to_string() } else { filtered.join(",") }
-                                                                } else {
-                                                                    let mut updated = current;
-                                                                    updated.push(value.to_string());
-                                                                    updated.join(",")
-                                                                };
-                                                                discovery_profiles.set(new_profiles.clone());
-                                                                let update = api::UpdateUserSettings {
-                                                                    discovery_profiles: Some(new_profiles),
-                                                                    ..Default::default()
-                                                                };
-                                                                let _ = api::update_user_settings(update).await;
-                                                            },
-                                                            "{label}"
+                                                        div { class: "flex items-center gap-2",
+                                                            // Toggle button
+                                                            button {
+                                                                class: format!(
+                                                                    "shrink-0 w-16 py-0.5 text-xs font-mono rounded cursor-pointer transition-colors text-center {}",
+                                                                    if active { "bg-white/15 text-white" } else { "bg-white/5 text-gray-500" }
+                                                                ),
+                                                                onclick: move |_| async move {
+                                                                    let current: Vec<String> = discovery_profiles().split(',')
+                                                                        .map(|s| s.trim().to_string())
+                                                                        .filter(|s| !s.is_empty())
+                                                                        .collect();
+                                                                    let new_profiles = if current.iter().any(|p| p == value) {
+                                                                        let filtered: Vec<_> = current.into_iter().filter(|p| p != value).collect();
+                                                                        if filtered.is_empty() { value.to_string() } else { filtered.join(",") }
+                                                                    } else {
+                                                                        let mut updated = current;
+                                                                        updated.push(value.to_string());
+                                                                        updated.join(",")
+                                                                    };
+                                                                    discovery_profiles.set(new_profiles.clone());
+                                                                    let update = api::UpdateUserSettings {
+                                                                        discovery_profiles: Some(new_profiles),
+                                                                        ..Default::default()
+                                                                    };
+                                                                    let _ = api::update_user_settings(update).await;
+                                                                },
+                                                                "{label}"
+                                                            }
+                                                            // Name input
+                                                            input {
+                                                                class: "flex-1 p-1 rounded bg-beet-panel/50 border border-white/5 focus:border-beet-accent focus:outline-none text-white font-mono text-xs",
+                                                                value: "{name_signal}",
+                                                                disabled: !active,
+                                                                oninput: {
+                                                                    let signal = *name_signal;
+                                                                    move |e: Event<FormData>| signal.clone().set(e.value())
+                                                                },
+                                                                onchange: move |_| async move {
+                                                                    let names = serde_json::json!({
+                                                                        "Conservative": pl_name_safe(),
+                                                                        "Balanced": pl_name_mix(),
+                                                                        "Adventurous": pl_name_wild(),
+                                                                    });
+                                                                    let update = api::UpdateUserSettings {
+                                                                        discovery_playlist_name: Some(names.to_string()),
+                                                                        ..Default::default()
+                                                                    };
+                                                                    let _ = api::update_user_settings(update).await;
+                                                                },
+                                                                placeholder: value,
+                                                            }
                                                         }
-                                                        // Name input
-                                                        input {
-                                                            class: "flex-1 p-1 rounded bg-beet-panel/50 border border-white/5 focus:border-beet-accent focus:outline-none text-white font-mono text-xs",
-                                                            value: "{signal}",
-                                                            disabled: !active,
-                                                            oninput: {
-                                                                let signal = *signal;
-                                                                move |e: Event<FormData>| signal.clone().set(e.value())
-                                                            },
-                                                            onchange: move |_| async move {
-                                                                let names = serde_json::json!({
-                                                                    "Conservative": pl_name_safe(),
-                                                                    "Balanced": pl_name_mix(),
-                                                                    "Adventurous": pl_name_wild(),
-                                                                });
-                                                                let update = api::UpdateUserSettings {
-                                                                    discovery_playlist_name: Some(names.to_string()),
-                                                                    ..Default::default()
-                                                                };
-                                                                let _ = api::update_user_settings(update).await;
-                                                            },
-                                                            placeholder: value,
+                                                        // Per-profile track count and lifetime
+                                                        if active {
+                                                            div { class: "flex gap-2 mt-1.5 ml-18",
+                                                                div { class: "flex items-center gap-1",
+                                                                    span { class: "text-[10px] font-mono text-gray-500", "Tracks" }
+                                                                    input {
+                                                                        class: "w-12 p-0.5 rounded bg-beet-panel/50 border border-white/5 focus:border-beet-accent focus:outline-none text-white font-mono text-xs text-center",
+                                                                        "type": "number",
+                                                                        min: "1",
+                                                                        max: "50",
+                                                                        value: "{tc_signal}",
+                                                                        oninput: {
+                                                                            let sig = *tc_signal;
+                                                                            move |e: Event<FormData>| sig.clone().set(e.value())
+                                                                        },
+                                                                        onchange: move |_| async move {
+                                                                            let counts = serde_json::json!({
+                                                                                "Conservative": tc_safe().parse::<u32>().unwrap_or(10),
+                                                                                "Balanced": tc_mix().parse::<u32>().unwrap_or(10),
+                                                                                "Adventurous": tc_wild().parse::<u32>().unwrap_or(10),
+                                                                            });
+                                                                            let update = api::UpdateUserSettings {
+                                                                                discovery_track_count: Some(counts.to_string()),
+                                                                                ..Default::default()
+                                                                            };
+                                                                            let _ = api::update_user_settings(update).await;
+                                                                        },
+                                                                    }
+                                                                }
+                                                                div { class: "flex items-center gap-1",
+                                                                    span { class: "text-[10px] font-mono text-gray-500", "Days" }
+                                                                    input {
+                                                                        class: "w-12 p-0.5 rounded bg-beet-panel/50 border border-white/5 focus:border-beet-accent focus:outline-none text-white font-mono text-xs text-center",
+                                                                        "type": "number",
+                                                                        min: "1",
+                                                                        max: "90",
+                                                                        value: "{lt_signal}",
+                                                                        oninput: {
+                                                                            let sig = *lt_signal;
+                                                                            move |e: Event<FormData>| sig.clone().set(e.value())
+                                                                        },
+                                                                        onchange: move |_| async move {
+                                                                            let days = serde_json::json!({
+                                                                                "Conservative": lt_safe().parse::<u32>().unwrap_or(7),
+                                                                                "Balanced": lt_mix().parse::<u32>().unwrap_or(7),
+                                                                                "Adventurous": lt_wild().parse::<u32>().unwrap_or(7),
+                                                                            });
+                                                                            let update = api::UpdateUserSettings {
+                                                                                discovery_lifetime_days: Some(days.to_string()),
+                                                                                ..Default::default()
+                                                                            };
+                                                                            let _ = api::update_user_settings(update).await;
+                                                                        },
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
