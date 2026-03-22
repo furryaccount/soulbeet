@@ -343,10 +343,10 @@ async fn run_automation() {
                 match crate::server_fns::discovery::generate_discovery_playlist_internal(user_id)
                     .await
                 {
-                    Ok(count) => {
+                    Ok(result) => {
                         info!(
                             "Automation: regenerated discovery for user {} with {} tracks",
-                            user_id, count
+                            user_id, result.total_imported
                         );
                         // Create fresh playlists for the new batch
                         if let Err(e) = crate::server_fns::discovery::reconcile_discovery_playlists(user_id).await {

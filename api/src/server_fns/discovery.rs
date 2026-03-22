@@ -39,14 +39,17 @@ pub async fn get_discovery_config() -> Result<DiscoveryConfig, ServerFnError> {
     } else {
         None
     };
+    let track_counts = settings.parse_track_counts();
+    let lifetime_days = settings.parse_lifetime_days();
+    let playlist_names = serde_json::from_str(&settings.discovery_playlist_name).unwrap_or_default();
     Ok(DiscoveryConfig {
         enabled: settings.discovery_enabled,
         folder_id: settings.discovery_folder_id,
         folder_name,
-        track_counts: settings.parse_track_counts(),
-        lifetime_days: settings.parse_lifetime_days(),
+        track_counts,
+        lifetime_days,
         profiles: settings.discovery_profiles,
-        playlist_names: serde_json::from_str(&settings.discovery_playlist_name).unwrap_or_default(),
+        playlist_names,
         last_generated_at: settings.discovery_last_generated_at,
     })
 }
@@ -638,7 +641,7 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    let folder = Folder::get_by_id(&folder_id)
+    Folder::get_by_id(&folder_id)
         .await?
         .ok_or("Discovery folder not found")?;
 
