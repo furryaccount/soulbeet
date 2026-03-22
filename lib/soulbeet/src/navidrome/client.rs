@@ -14,7 +14,7 @@ const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
 const CIRCUIT_BREAKER_RESET_TIMEOUT_SECS: u64 = 60;
 const API_VERSION: &str = "1.16.1";
-const CLIENT_NAME: &str = "soulful";
+const CLIENT_NAME: &str = "Soulbeet";
 
 #[derive(Debug)]
 struct CircuitBreakerState {
