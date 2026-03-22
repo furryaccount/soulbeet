@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder, Response};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{Result, SoulseekError};
 
@@ -117,11 +117,17 @@ pub async fn resilient_send(
         let resp = match build_request().send().await {
             Ok(r) => r,
             Err(e) => {
+                let is_timeout = e.is_timeout();
                 warn!("{}: attempt {} network error: {}", context, attempt + 1, e);
                 last_err = SoulseekError::Api {
                     status: 0,
                     message: format!("{}: {}", context, e),
                 };
+                // Timeouts indicate the server is hanging, not a transient blip.
+                // Retry once in case it was a one-off, but don't keep waiting.
+                if is_timeout && attempt >= 1 {
+                    break;
+                }
                 continue;
             }
         };
@@ -413,7 +419,7 @@ pub async fn cached_recording_lookup(
     {
         Ok(r) => r,
         Err(e) => {
-            warn!("MusicBrainz recording lookup failed for '{}': {}", mbid, e);
+            debug!("MusicBrainz recording lookup failed for '{}': {}", mbid, e);
             RECORDING_CACHE.lock().await.insert(mbid.to_string(), None);
             return Ok(None);
         }
