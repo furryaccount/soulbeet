@@ -593,15 +593,26 @@ pub async fn generate_discovery_playlist_internal(user_id: &str) -> Result<share
 
     UserSettings::update_discovery_last_generated(user_id).await?;
 
-    // Trigger a Navidrome library scan so the imported files get indexed.
-    // Playlists are created later by reconcile_discovery_playlists() once
-    // Navidrome has scanned the new files.
+    // Trigger a Navidrome scan then wait for it to finish so playlists can be created.
     if total_downloads > 0 {
         if let Ok(navi) = crate::services::navidrome_client_for_user(user_id).await {
             if let Err(e) = navi.start_scan().await {
                 warn!("Failed to trigger Navidrome scan: {}", e);
             } else {
                 info!("Triggered Navidrome library scan after {} discovery imports", total_downloads);
+                // Wait for scan to complete (poll every 3s, max 2 min)
+                for _ in 0..40u32 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    match navi.get_scan_status().await {
+                        Ok(false) => break,
+                        Ok(true) => continue,
+                        Err(_) => break,
+                    }
+                }
+                // Create/update smart playlists now that tracks are indexed
+                if let Err(e) = reconcile_discovery_playlists(user_id).await {
+                    warn!("Playlist reconciliation after generation failed: {}", e);
+                }
             }
         }
     }
@@ -644,13 +655,15 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
     for profile in &selected_profiles {
         let profile_name = profile.to_string();
 
-        // Check if we already have a playlist for this profile
-        let existing_id = UserSettings::get_playlist_id_for_profile(
+        // If a playlist already exists, delete and recreate it so the path
+        // rule is always derived from the latest auto-detection. This fixes
+        // playlists that were created with a wrong path prefix.
+        if let Some(old_id) = UserSettings::get_playlist_id_for_profile(
             &settings.discovery_navidrome_playlist_id,
             &profile_name,
-        );
-        if existing_id.is_some() {
-            continue; // Smart playlist already exists, it auto-updates
+        ) {
+            let _ = navi.delete_smart_playlist(&old_id).await;
+            info!("Deleted old smart playlist for {} to recreate with correct path", profile_name);
         }
 
         let playlist_name = UserSettings::get_playlist_name_for_profile(
@@ -659,10 +672,22 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
         );
 
         // The filepath rule must use the path as Navidrome sees it.
-        // If NAVIDROME_MUSIC_PATH is set, we need to reverse the prefix mapping:
-        // local /music/terry/Discovery/Balanced -> Navidrome /media/music/terry/Discovery/Balanced
-        let local_profile_path = folder.discovery_profile_path(&profile_name);
-        let profile_path = to_navidrome_path(&local_profile_path, &folder.path);
+        // Auto-detect: search Navidrome for a discovery track and derive the
+        // correct path prefix from its actual stored path.
+        let discovery_marker = format!("Discovery/{}", profile_name);
+        let profile_path = match detect_navidrome_profile_path(&navi, &discovery_marker).await {
+            Some(path) => {
+                info!("Auto-detected Navidrome path for {}: {}", profile_name, path);
+                path
+            }
+            None => {
+                // Fallback: use env-var-based path mapping
+                let local_profile_path = folder.discovery_profile_path(&profile_name);
+                let fallback = to_navidrome_path(&local_profile_path, &folder.path);
+                info!("No tracks indexed yet for {}, using computed path: {}", profile_name, fallback);
+                fallback
+            }
+        };
         let comment = format!("Soulbeet discovery ({})", profile_name);
 
         match navi
@@ -827,6 +852,39 @@ fn to_navidrome_path(local_path: &str, folder_path: &str) -> String {
         }
         None => local_path.to_string(),
     }
+}
+
+/// Auto-detect the Navidrome filepath for a discovery profile directory.
+///
+/// Searches Navidrome for tracks whose path contains `discovery_marker`
+/// (e.g. "Discovery/Balanced") and returns the path up to and including
+/// that directory segment. This avoids needing NAVIDROME_MUSIC_PATH for
+/// smart playlist rules.
+#[cfg(feature = "server")]
+async fn detect_navidrome_profile_path(
+    navi: &soulbeet::NavidromeClient,
+    discovery_marker: &str,
+) -> Option<String> {
+    // Use search3 to find any track in this discovery profile directory.
+    // Search for "Discovery" which should match tracks in Discovery/* folders.
+    let results = match navi.search("Discovery").await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Path auto-detect: search failed: {}", e);
+            return None;
+        }
+    };
+
+    for song in &results.song {
+        if let Some(ref path) = song.path {
+            // Look for the discovery_marker in the path, e.g. "Discovery/Balanced"
+            if let Some(idx) = path.find(discovery_marker) {
+                return Some(path[..idx + discovery_marker.len()].to_string());
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(feature = "server")]
