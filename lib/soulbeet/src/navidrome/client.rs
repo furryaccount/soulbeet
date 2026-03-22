@@ -76,6 +76,7 @@ pub struct NavidromeClient {
     password: String,
     client: Client,
     circuit_breaker: CircuitBreaker,
+    native_token: tokio::sync::Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -143,6 +144,7 @@ impl NavidromeClientBuilder {
             password,
             client,
             circuit_breaker: CircuitBreaker::default(),
+            native_token: tokio::sync::Mutex::new(None),
         })
     }
 }
@@ -510,7 +512,13 @@ impl NavidromeClient {
     // --- Navidrome Native API (for smart playlists) ---
 
     /// Get a JWT token from Navidrome's native auth endpoint.
+    /// Caches the token so repeated calls don't hit the login endpoint.
     async fn native_login(&self) -> Result<String> {
+        let mut cached = self.native_token.lock().await;
+        if let Some(ref token) = *cached {
+            return Ok(token.clone());
+        }
+
         let url = self
             .base_url
             .join("auth/login")
@@ -554,6 +562,7 @@ impl NavidromeClient {
             status: 0,
             message: format!("Failed to parse login response: {}", e),
         })?;
+        *cached = Some(login.token.clone());
         Ok(login.token)
     }
 
