@@ -1,74 +1,18 @@
-use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
-use std::{path::Path, time::Duration as StdDuration};
+use std::time::Duration as StdDuration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::error::{Result, SoulseekError};
+use crate::http::{resolve_docker_url, CircuitBreaker};
 
 use super::models::*;
 
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
-const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
-const CIRCUIT_BREAKER_RESET_TIMEOUT_SECS: u64 = 60;
 const API_VERSION: &str = "1.16.1";
 const CLIENT_NAME: &str = "Soulbeet";
-
-#[derive(Debug)]
-struct CircuitBreakerState {
-    failure_count: u64,
-    last_failure_time: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug)]
-struct CircuitBreaker {
-    state: Mutex<CircuitBreakerState>,
-    failure_threshold: u64,
-    reset_timeout: Duration,
-}
-
-impl Default for CircuitBreaker {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(CircuitBreakerState {
-                failure_count: 0,
-                last_failure_time: None,
-            }),
-            failure_threshold: CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-            reset_timeout: Duration::seconds(CIRCUIT_BREAKER_RESET_TIMEOUT_SECS as i64),
-        }
-    }
-}
-
-impl CircuitBreaker {
-    async fn is_open(&self) -> bool {
-        let mut state = self.state.lock().await;
-        if state.failure_count < self.failure_threshold {
-            return false;
-        }
-        if let Some(last_time) = state.last_failure_time {
-            if Utc::now() - last_time > self.reset_timeout {
-                state.failure_count = 0;
-                state.last_failure_time = None;
-                return false;
-            }
-        }
-        true
-    }
-
-    async fn record_success(&self) {
-        let mut state = self.state.lock().await;
-        state.failure_count = 0;
-    }
-
-    async fn record_failure(&self) {
-        let mut state = self.state.lock().await;
-        state.failure_count += 1;
-        state.last_failure_time = Some(Utc::now());
-    }
-}
 
 pub struct NavidromeClient {
     base_url: Url,
@@ -92,15 +36,7 @@ impl NavidromeClientBuilder {
     }
 
     pub fn base_url(mut self, url: &str) -> Self {
-        let mut resolved_url = url.to_string();
-        if Path::new("/.dockerenv").exists() && resolved_url.contains("localhost") {
-            resolved_url = resolved_url.replace("localhost", "host.docker.internal");
-            info!(
-                "Docker detected, using {} for Navidrome connection",
-                resolved_url
-            );
-        }
-        self.base_url = Some(resolved_url);
+        self.base_url = Some(resolve_docker_url(url));
         self
     }
 

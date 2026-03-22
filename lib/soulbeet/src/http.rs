@@ -1,12 +1,90 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder, Response};
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::error::{Result, SoulseekError};
+
+// --- Circuit Breaker ---
+
+#[derive(Debug)]
+struct CircuitBreakerState {
+    failure_count: u64,
+    last_failure_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    state: Mutex<CircuitBreakerState>,
+    failure_threshold: u64,
+    reset_timeout: chrono::Duration,
+}
+
+impl CircuitBreaker {
+    pub fn new(failure_threshold: u64, reset_timeout_secs: i64) -> Self {
+        Self {
+            state: Mutex::new(CircuitBreakerState {
+                failure_count: 0,
+                last_failure_time: None,
+            }),
+            failure_threshold,
+            reset_timeout: chrono::Duration::seconds(reset_timeout_secs),
+        }
+    }
+
+    pub async fn is_open(&self) -> bool {
+        let mut state = self.state.lock().await;
+        if state.failure_count < self.failure_threshold {
+            return false;
+        }
+        if let Some(last_time) = state.last_failure_time {
+            if Utc::now() - last_time > self.reset_timeout {
+                state.failure_count = 0;
+                state.last_failure_time = None;
+                return false;
+            }
+        }
+        true
+    }
+
+    pub async fn record_success(&self) {
+        let mut state = self.state.lock().await;
+        state.failure_count = 0;
+    }
+
+    pub async fn record_failure(&self) {
+        let mut state = self.state.lock().await;
+        state.failure_count += 1;
+        state.last_failure_time = Some(Utc::now());
+    }
+
+    pub async fn failure_count(&self) -> u64 {
+        self.state.lock().await.failure_count
+    }
+}
+
+impl Default for CircuitBreaker {
+    fn default() -> Self {
+        Self::new(5, 60)
+    }
+}
+
+// --- Docker URL resolution ---
+
+/// Resolve localhost URLs to host.docker.internal when running inside Docker.
+pub fn resolve_docker_url(url: &str) -> String {
+    let mut resolved = url.to_string();
+    if Path::new("/.dockerenv").exists() && resolved.contains("localhost") {
+        resolved = resolved.replace("localhost", "host.docker.internal");
+        info!("Docker detected, rewriting URL to {}", resolved);
+    }
+    resolved
+}
 
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 500;

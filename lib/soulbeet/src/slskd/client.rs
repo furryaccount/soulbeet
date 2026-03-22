@@ -1,6 +1,7 @@
 use super::processing;
 use crate::{
     error::{Result, SoulseekError},
+    http::{resolve_docker_url, CircuitBreaker},
     slskd::models::{DownloadRequestFile, SearchResponse},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -10,89 +11,15 @@ use shared::{
     metadata::{Album, Track},
     slskd::{AlbumResult, DownloadResponse, FileEntry, FlattenedFiles, SearchState, TrackResult},
 };
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration as StdDuration};
+use std::{collections::HashMap, sync::Arc, time::Duration as StdDuration};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use url::Url;
 
 const MAX_SEARCH_RESULTS: usize = 50;
 
-/// HTTP client timeouts
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
-
-/// Circuit breaker configuration
-const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
-const CIRCUIT_BREAKER_RESET_TIMEOUT_SECS: u64 = 60;
-
-/// Circuit breaker state for protecting against cascading failures.
-///
-/// Uses a single mutex to ensure atomic state transitions and prevent race conditions.
-#[derive(Debug)]
-pub struct CircuitBreaker {
-    state: Mutex<CircuitBreakerState>,
-    failure_threshold: u64,
-    reset_timeout: Duration,
-}
-
-#[derive(Debug)]
-struct CircuitBreakerState {
-    failure_count: u64,
-    last_failure_time: Option<DateTime<Utc>>,
-}
-
-impl Default for CircuitBreaker {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(CircuitBreakerState {
-                failure_count: 0,
-                last_failure_time: None,
-            }),
-            failure_threshold: CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-            reset_timeout: Duration::seconds(CIRCUIT_BREAKER_RESET_TIMEOUT_SECS as i64),
-        }
-    }
-}
-
-impl CircuitBreaker {
-    /// Check if the circuit breaker is open (blocking requests).
-    ///
-    /// If the reset timeout has passed, atomically resets the breaker and returns false.
-    pub async fn is_open(&self) -> bool {
-        let mut state = self.state.lock().await;
-
-        if state.failure_count < self.failure_threshold {
-            return false;
-        }
-
-        if let Some(last_time) = state.last_failure_time {
-            if Utc::now() - last_time > self.reset_timeout {
-                state.failure_count = 0;
-                state.last_failure_time = None;
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Record a successful request
-    pub async fn record_success(&self) {
-        let mut state = self.state.lock().await;
-        state.failure_count = 0;
-    }
-
-    /// Record a failed request
-    pub async fn record_failure(&self) {
-        let mut state = self.state.lock().await;
-        state.failure_count += 1;
-        state.last_failure_time = Some(Utc::now());
-    }
-
-    pub async fn failure_count(&self) -> u64 {
-        self.state.lock().await.failure_count
-    }
-}
 
 /// Configuration for download batching to avoid overwhelming the slskd API.
 #[derive(Debug, Clone)]
@@ -156,14 +83,7 @@ impl SoulseekClientBuilder {
     }
 
     pub fn base_url(mut self, url: &str) -> Self {
-        let mut resolved_url = url.to_string();
-        if Path::new("/.dockerenv").exists() && resolved_url.contains("localhost") {
-            resolved_url = resolved_url.replace("localhost", "host.docker.internal");
-            info!(
-                "Docker detected, using {} for slskd connection",
-                resolved_url
-            );
-        }
+        let resolved_url = resolve_docker_url(url);
         self.base_url = Some(resolved_url);
         self
     }
