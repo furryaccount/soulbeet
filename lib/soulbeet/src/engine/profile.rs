@@ -90,13 +90,16 @@ pub async fn build_profile(provider: &dyn ScrobbleProvider) -> Result<UserMusicP
         Err(e) => warn!("Obscurity score step failed: {}", e),
     }
 
-    // --- Step 3: Repeat ratio ---
-    if !top_tracks_alltime.is_empty() {
-        let unique: HashSet<String> = top_tracks_alltime
-            .iter()
-            .map(|t| format!("{}:{}", t.artist.to_lowercase(), t.track.to_lowercase()))
-            .collect();
-        profile.repeat_ratio = unique.len() as f64 / top_tracks_alltime.len() as f64;
+    // --- Step 3: Repeat ratio (from raw listens, not deduplicated top tracks) ---
+    {
+        let listens = provider.get_listens(1000).await.unwrap_or_default();
+        if !listens.is_empty() {
+            let unique: HashSet<String> = listens
+                .iter()
+                .map(|l| format!("{}:{}", l.artist.to_lowercase(), l.track.to_lowercase()))
+                .collect();
+            profile.repeat_ratio = unique.len() as f64 / listens.len() as f64;
+        }
     }
 
     // --- Step 4: Freshness half-life ---
@@ -209,8 +212,10 @@ async fn build_obscurity_score(
     for artist in &artists_to_query {
         match provider.get_artist_popularity(&artist.name).await {
             Ok(pop) => {
-                if pop.listener_count > 0 {
-                    listener_counts.push(pop.listener_count);
+                // Use play_count (total listens) to match the unit from
+                // get_global_popularity_median, which also returns total listens.
+                if pop.play_count > 0 {
+                    listener_counts.push(pop.play_count);
                 }
             }
             Err(e) => {
